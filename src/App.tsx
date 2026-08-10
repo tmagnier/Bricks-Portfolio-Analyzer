@@ -165,7 +165,7 @@ export default function App() {
 
   // Auto load data.json by default if it exists in root
   useEffect(() => {
-    fetch('/data.json')
+    fetch(`${import.meta.env.BASE_URL}data.json`)
       .then(res => {
         if (res.ok) return res.json();
         return null;
