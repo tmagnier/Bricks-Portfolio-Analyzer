@@ -114,6 +114,8 @@ export interface PropertyStats {
   projectOpeningDate?: string; // Date d'ouverture/lancement du projet (dd/MM/yyyy)
   transactions: Transaction[];
   metadata?: ProjectMetadata;
+  contractType?: string;
+  isObligation?: boolean;
   // Bricks details
   ownedBricks: number; // Nombre de briques possédées
   currentBrickPrice: number; // Prix actuel par brique (€)
@@ -133,6 +135,14 @@ export interface GlobalStats {
   totalInvested: number;
   totalStartCapital: number;
   totalCurrentCapital: number; // Encours d'investissement
+  totalCurrentRoyaltyCapital: number; // Encours Royalties
+  totalCurrentObligationCapital: number; // Encours Obligations
+  totalStartRoyaltyCapital?: number;
+  totalStartObligationCapital?: number;
+  royaltyActiveProjectsCount?: number;
+  obligationActiveProjectsCount?: number;
+  royaltyOwnedBricks?: number;
+  obligationOwnedBricks?: number;
   totalCapitalGain: number;
   totalNetRevenues: number;
   periodRoyaltyRevenues: number;

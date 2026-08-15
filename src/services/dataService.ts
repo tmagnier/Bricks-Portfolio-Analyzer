@@ -512,11 +512,22 @@ export const calculateStats = (
       }
     }
 
+    const normContract = (txs.find(t => t["type de contrat"])?.["type de contrat"] || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const metaContract = (propertyMetadata?.investorContractType || propertyMetadata?.contractType || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const normName = name.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+    const isObligation = normContract.includes("obligation") || normContract.includes("loan") || normContract.includes("pret") ||
+                         metaContract.includes("obligation") || metaContract.includes("loan") || metaContract.includes("pret") ||
+                         normName.includes("obligation");
+    const contractType = isObligation ? "Obligation" : "Royalty";
+
     return {
       name,
       totalInvested,
       startCapital,
       currentCapital,
+      contractType,
+      isObligation,
       capitalGain,
       totalRevenues,
       netRevenues,
@@ -605,6 +616,34 @@ export const calculateStats = (
   const totalCapitalGain = totalCurrentCapital - totalStartCapital;
   const totalNetRevenues = properties.reduce((acc, p) => acc + p.netRevenues, 0) + otherNetRevenues;
   const totalPeriodSales = properties.reduce((acc, p) => acc + p.periodSales, 0) + otherPeriodSales;
+
+  // Breakdown Royalties vs Obligations
+  let totalCurrentRoyaltyCapital = 0;
+  let totalCurrentObligationCapital = 0;
+  let totalStartRoyaltyCapital = 0;
+  let totalStartObligationCapital = 0;
+  let royaltyActiveProjectsCount = 0;
+  let obligationActiveProjectsCount = 0;
+  let royaltyOwnedBricks = 0;
+  let obligationOwnedBricks = 0;
+
+  properties.forEach(p => {
+    if (p.isObligation) {
+      totalCurrentObligationCapital += p.currentCapital;
+      totalStartObligationCapital += p.startCapital;
+      if (p.currentCapital > 0.01) {
+        obligationActiveProjectsCount++;
+        obligationOwnedBricks += p.ownedBricks;
+      }
+    } else {
+      totalCurrentRoyaltyCapital += p.currentCapital;
+      totalStartRoyaltyCapital += p.startCapital;
+      if (p.currentCapital > 0.01) {
+        royaltyActiveProjectsCount++;
+        royaltyOwnedBricks += p.ownedBricks;
+      }
+    }
+  });
 
   // Compute Project Counts
   let newProjectsCount = 0;
@@ -859,6 +898,14 @@ export const calculateStats = (
       totalInvested,
       totalStartCapital,
       totalCurrentCapital,
+      totalCurrentRoyaltyCapital,
+      totalCurrentObligationCapital,
+      totalStartRoyaltyCapital,
+      totalStartObligationCapital,
+      royaltyActiveProjectsCount,
+      obligationActiveProjectsCount,
+      royaltyOwnedBricks: Math.round(royaltyOwnedBricks * 100) / 100,
+      obligationOwnedBricks: Math.round(obligationOwnedBricks * 100) / 100,
       totalCapitalGain,
       totalNetRevenues,
       periodRoyaltyRevenues,
