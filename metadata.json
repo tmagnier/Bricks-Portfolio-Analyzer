@@ -1,5 +1,8 @@
 {
   "name": "Bricks Portfolio Analyzer",
   "description": "Analyseur de portefeuille immobilier Bricks.co : prix de revient, revenus et rendements par immeuble.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

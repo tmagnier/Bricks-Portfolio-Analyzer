@@ -1,5 +1,19 @@
-import { parse, format, isAfter, isBefore, subMonths, subYears, startOfDay, endOfDay, getYear, startOfMonth, endOfMonth, differenceInDays } from "date-fns";
-import { Transaction, PropertyStats, GlobalStats, ProjectMetadata } from "../types";
+import { parse, format, isAfter, isBefore, subMonths, subYears, startOfDay, endOfDay, getYear, startOfMonth, endOfMonth, differenceInDays, addMonths } from "date-fns";
+import { 
+  Transaction, 
+  PropertyStats, 
+  GlobalStats, 
+  ProjectMetadata, 
+  PropertyTimelinePoint,
+  TransactionType,
+  normalizeTransactionType,
+  isPurchaseType,
+  isRevenueType,
+  isRepaymentOrSaleType,
+  isTotalResaleType,
+  isFeeType,
+  isTaxType
+} from "../types";
 
 export const parseDate = (dateStr: string) => parse(dateStr, "dd/MM/yyyy", new Date());
 
@@ -26,53 +40,62 @@ export function formatInvestmentDuration(start: Date, end: Date): string {
 
 export const getSoldeImpact = (typeStr: string): number => {
   if (!typeStr) return 0;
-  const norm = typeStr.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const normType = normalizeTransactionType(typeStr);
 
-  // 1. Inflows (+1)
-  if (norm.includes("remboursement")) {
-    // Remboursement de capital, Remboursement partiel d'investissement...
-    return 1;
-  }
-  if (norm.includes("solde booste")) {
-    return 1;
-  }
-  if (norm.includes("credit") || norm.includes("depot") || norm.includes("recharge") || norm.includes("alimentation")) {
-    // Crédit par carte, Crédit par virement...
-    return 1;
-  }
-  if (norm.includes("vente")) {
-    // Vente Marketplace...
-    return 1;
-  }
-  if (norm.includes("revenus")) {
-    // Revenus reversés, Revenus reversés - revente d'un lot, Revenus reversés - revente totale...
-    return 1;
-  }
-  if (norm.includes("ajustement commercial")) {
-    return 1;
-  }
-  if (norm.includes("prime de parrainage") || norm.includes("parrainage")) {
-    // Prime de parrainage, en tant que parrain, en tant que filleul...
-    return 1;
-  }
-  if (norm.includes("carte cadeau")) {
-    if (norm.includes("achat")) return -1; // Achat de carte cadeau
-    return 1; // Utilisation de la carte cadeau
-  }
+  switch (normType) {
+    // Entrées dans le solde (+1)
+    case TransactionType.CREDIT_CARTE:
+    case TransactionType.CREDIT_VIREMENT:
+    case TransactionType.SOLDE_BOOSTE:
+    case TransactionType.REVENUS_REVERSES:
+    case TransactionType.REVENUS_REVENTE_LOT:
+    case TransactionType.REVENUS_REVENTE_TOTALE:
+    case TransactionType.REMBOURSEMENT_CAPITAL:
+    case TransactionType.REMBOURSEMENT_SOCIETE_BRICKS:
+    case TransactionType.AJUSTEMENT_COMMERCIAL:
+    case TransactionType.PARRAINAGE_PARRAIN:
+    case TransactionType.PARRAINAGE_FILLEUL:
+    case TransactionType.PARRAINAGE_GENERIQUE:
+    case TransactionType.UTILISATION_CARTE_CADEAU:
+    case TransactionType.VENTE_MARKETPLACE:
+      return 1;
 
-  // 2. Outflows (-1)
-  if (
-    norm.includes("achat") || // Achat de bricks, Achat marketplace, Frais d'achat marketplace...
-    norm.includes("prelevement") || // Prélèvement à la source
-    norm.includes("retrait") || // Retrait
-    norm.includes("frais") || // Frais d'achat marketplace
-    norm.includes("investissement") // Investissement dans la société Bricks
-  ) {
-    return -1;
-  }
+    // Sorties du solde (-1)
+    case TransactionType.ACHAT_BRICKS:
+    case TransactionType.ACHAT_MARKETPLACE:
+    case TransactionType.FRAIS_ACHAT_MARKETPLACE:
+    case TransactionType.ACHAT_CARTE_CADEAU:
+    case TransactionType.RETRAIT:
+    case TransactionType.PRELEVEMENT_SOURCE:
+    case TransactionType.INVESTISSEMENT_SOCIETE_BRICKS:
+      return -1;
 
-  // Default fallback
-  return 1;
+    default: {
+      const norm = typeStr.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      if (
+        norm.includes("remboursement") || 
+        norm.includes("solde booste") || 
+        norm.includes("credit") || 
+        norm.includes("depot") || 
+        norm.includes("vente") || 
+        norm.includes("revenus") || 
+        norm.includes("ajustement") || 
+        norm.includes("parrainage")
+      ) {
+        return 1;
+      }
+      if (
+        norm.includes("achat") || 
+        norm.includes("prelevement") || 
+        norm.includes("retrait") || 
+        norm.includes("frais") || 
+        norm.includes("investissement")
+      ) {
+        return -1;
+      }
+      return 1;
+    }
+  }
 };
 
 export const getAvailableYears = (transactions: Transaction[]) => {
@@ -112,6 +135,7 @@ export const calculateStats = (
     let currentCapital = 0;
     let totalRevenues = 0;
     let netRevenues = 0;
+    let commercialAdjustments = 0;
     let periodSales = 0;
 
     // Find earliest investment date (first purchase by user)
@@ -120,10 +144,23 @@ export const calculateStats = (
       if (diff !== 0) return diff;
       return b._origIdx - a._origIdx;
     });
-    const purchaseTxs = sortedTxsAsc.filter(t => t.type.includes("Achat") && !t.type.toLowerCase().includes("frais"));
+    const purchaseTxs = sortedTxsAsc.filter(t => isPurchaseType(t.type));
     const firstTx = purchaseTxs.length > 0 ? purchaseTxs[0] : sortedTxsAsc[0];
     const firstInvestmentDate = firstTx ? firstTx.date : undefined;
     const firstInvestmentDateObj = firstTx ? parseDate(firstTx.date) : null;
+
+    // Find earliest revenue transaction for this property
+    const revenueTxs = sortedTxsAsc.filter(t => isRevenueType(t.type));
+    let firstRevenueDate: string | undefined = undefined;
+    let daysBeforeFirstRevenue: number | undefined = undefined;
+    if (revenueTxs.length > 0) {
+      const firstRevTx = revenueTxs[0];
+      firstRevenueDate = firstRevTx.date;
+      const firstRevDateObj = parseDate(firstRevTx.date);
+      if (firstInvestmentDateObj && !isNaN(firstInvestmentDateObj.getTime()) && !isNaN(firstRevDateObj.getTime())) {
+        daysBeforeFirstRevenue = Math.max(0, differenceInDays(firstRevDateObj, firstInvestmentDateObj));
+      }
+    }
 
     let totalResaleOccurredBeforeEnd = false;
     let runningCapital = 0;
@@ -132,18 +169,16 @@ export const calculateStats = (
     sortedTxsAsc.forEach(t => {
       const amount = parseFloat(t["montant (€)"].replace(",", "."));
       const tDate = parseDate(t.date);
-      const normTypeLower = t.type.toLowerCase();
-      const isReventeTotale = normTypeLower.includes("revente totale") || normTypeLower.includes("revente-totale");
-      const isRevente = normTypeLower.includes("revente");
-      const isFrais = normTypeLower.includes("frais");
-      const isRevenus = normTypeLower.includes("revenus");
-      const isPureRevenus = isRevenus && !isRevente;
+      const isReventeTotale = isTotalResaleType(t.type);
+      const isAchat = isPurchaseType(t.type);
+      const isRepaymentOrSale = isRepaymentOrSaleType(t.type);
+      const isRevenue = isRevenueType(t.type);
 
       const prevCap = runningCapital;
       // Track running capital chronologically
-      if (t.type.includes("Achat") && !isFrais) {
+      if (isAchat) {
         runningCapital += Math.abs(amount);
-      } else if (!isRevenus && (t.type.includes("Vente") || t.type.includes("Remboursement")) && !isFrais) {
+      } else if (!isRevenue && isRepaymentOrSale) {
         runningCapital = Math.max(0, runningCapital - Math.abs(amount));
       }
       if (isReventeTotale) {
@@ -158,15 +193,15 @@ export const calculateStats = (
       const isBeforeEnd = !endDate || isBefore(tDate, endOfDay(endDate)) || tDate.getTime() === endOfDay(endDate).getTime();
 
       // Total invested ever
-      if (t.type.includes("Achat") && !isFrais) {
+      if (isAchat) {
         totalInvested += Math.abs(amount);
       }
 
       // Start capital (cumulative before startDate)
       if (isBeforeStart) {
-        if (t.type.includes("Achat") && !isFrais) {
+        if (isAchat) {
           startCapital += Math.abs(amount);
-        } else if (!isRevenus && (t.type.includes("Vente") || t.type.includes("Remboursement")) && !isFrais) {
+        } else if (!isRevenue && isRepaymentOrSale) {
           startCapital -= Math.abs(amount);
         }
         if (isReventeTotale) {
@@ -176,9 +211,9 @@ export const calculateStats = (
 
       // End capital (cumulative up to endDate)
       if (isBeforeEnd) {
-        if (t.type.includes("Achat") && !isFrais) {
+        if (isAchat) {
           currentCapital += Math.abs(amount);
-        } else if (!isRevenus && (t.type.includes("Vente") || t.type.includes("Remboursement")) && !isFrais) {
+        } else if (!isRevenue && isRepaymentOrSale) {
           currentCapital -= Math.abs(amount);
         }
         if (isReventeTotale) {
@@ -192,12 +227,17 @@ export const calculateStats = (
                         (!endDate || isBefore(tDate, endOfDay(endDate)) || tDate.getTime() === endOfDay(endDate).getTime());
 
       if (isInRange) {
-        if ((t.type.includes("Revenus reversés") && !isRevente) || t.type === "Solde boosté" || t.type === "Prime de parrainage") {
+        const normType = normalizeTransactionType(t.type);
+        if (normType === TransactionType.AJUSTEMENT_COMMERCIAL) {
+          commercialAdjustments += amount;
           totalRevenues += amount;
           netRevenues += amount;
-        } else if (t.type === "Prélèvement à la source") {
+        } else if (isRevenue) {
+          totalRevenues += amount;
           netRevenues += amount;
-        } else if (t.type.includes("Vente") || t.type.includes("Remboursement") || isRevente) {
+        } else if (normType === TransactionType.PRELEVEMENT_SOURCE || isTaxType(t.type)) {
+          netRevenues += amount;
+        } else if (isRepaymentOrSale) {
           periodSales += Math.abs(amount);
         }
       }
@@ -215,6 +255,7 @@ export const calculateStats = (
     totalInvested = Math.round(totalInvested * 100) / 100;
     totalRevenues = Math.round(totalRevenues * 100) / 100;
     netRevenues = Math.round(netRevenues * 100) / 100;
+    commercialAdjustments = Math.round(commercialAdjustments * 100) / 100;
     periodSales = Math.round(periodSales * 100) / 100;
 
     // Yield logic: use totalInvested if > 0, otherwise fallback to current capital
@@ -302,9 +343,34 @@ export const calculateStats = (
       costForOwnedBricks = currentCapital;
     }
 
+    // Calculate total historical bought bricks and purchase cost
+    let totalBoughtBricks = 0;
+    let totalPurchaseCost = 0;
+    sortedTxsAsc.forEach(t => {
+      const rawVal = parseFloat((t["montant (€)"] || "0").replace(",", "."));
+      if (isNaN(rawVal)) return;
+      const absAmount = Math.abs(rawVal);
+      const normType = (t.type || "").toLowerCase();
+      const isFrais = normType.includes("frais");
+      if (normType.includes("achat") && !isFrais) {
+        let rawTxBrickPrice = parseFloat((t["prix de la brick (€)"] || "").replace(",", "."));
+        if (isNaN(rawTxBrickPrice) || rawTxBrickPrice <= 0) {
+          rawTxBrickPrice = currentBrickPrice;
+        }
+        totalBoughtBricks += (absAmount / rawTxBrickPrice);
+        totalPurchaseCost += absAmount;
+      }
+    });
+
+    totalBoughtBricks = Math.round(totalBoughtBricks * 1000) / 1000;
+    totalPurchaseCost = Math.round(totalPurchaseCost * 100) / 100;
+    const historicalAverageBuyBrickPrice = totalBoughtBricks > 0 ? (totalPurchaseCost / totalBoughtBricks) : 10;
+
     ownedBricks = Math.round(ownedBricks * 1000) / 1000;
     costForOwnedBricks = Math.round(costForOwnedBricks * 100) / 100;
-    const averageBuyBrickPrice = ownedBricks > 0 ? costForOwnedBricks / ownedBricks : 0;
+    const averageBuyBrickPrice = ownedBricks > 0 ? (costForOwnedBricks / ownedBricks) : historicalAverageBuyBrickPrice;
+    const netCostForOwnedBricks = Math.max(0, Math.round((costForOwnedBricks - netRevenues) * 100) / 100);
+    const netBrickPrice = ownedBricks > 0 ? Math.max(0, (costForOwnedBricks - netRevenues) / ownedBricks) : 0;
     const currentTotalValue = Math.round(ownedBricks * currentBrickPrice * 100) / 100;
     const latentCapitalGain = Math.round((currentTotalValue - costForOwnedBricks) * 100) / 100;
     const latentCapitalGainPercent = costForOwnedBricks > 0 ? (latentCapitalGain / costForOwnedBricks) * 100 : 0;
@@ -375,14 +441,74 @@ export const calculateStats = (
 
     // Project opening date from metadata
     let projectOpeningDate: string | undefined = undefined;
+    let projectStartDateObj: Date | null = null;
     if (propertyMetadata?.funding?.startedAt) {
       try {
         const startDateObj = new Date(propertyMetadata.funding.startedAt);
         if (!isNaN(startDateObj.getTime())) {
           projectOpeningDate = format(startDateObj, "dd/MM/yyyy");
+          projectStartDateObj = startDateObj;
         }
       } catch (e) {
         // fallback
+      }
+    }
+
+    if (!projectStartDateObj && firstInvestmentDateObj) {
+      projectStartDateObj = firstInvestmentDateObj;
+    }
+
+    let finalRepaymentDate: string | undefined = capitalZeroDate;
+    let repaymentTimingStatus: 'anticipation' | 'retard' | 'on_time' | undefined = undefined;
+    let repaymentTimingLabel: string | undefined = undefined;
+    let expectedEndDate: string | undefined = undefined;
+
+    const horizonMonths = propertyMetadata?.investmentHorizonInMonths;
+    if (projectStartDateObj && horizonMonths && horizonMonths > 0) {
+      try {
+        const expEnd = addMonths(projectStartDateObj, horizonMonths);
+        expectedEndDate = format(expEnd, "dd/MM/yyyy");
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (isProjectFinished) {
+      if (!finalRepaymentDate && sortedTxsAsc.length > 0) {
+        const lastRefundTx = [...sortedTxsAsc].reverse().find(t => {
+          const norm = t.type.toLowerCase();
+          return norm.includes("vente") || norm.includes("remboursement") || norm.includes("revente");
+        });
+        if (lastRefundTx) {
+          finalRepaymentDate = lastRefundTx.date;
+        }
+      }
+
+      if (finalRepaymentDate) {
+        const repaymentDateObj = parseDate(finalRepaymentDate);
+        if (projectStartDateObj && horizonMonths && horizonMonths > 0 && !isNaN(repaymentDateObj.getTime())) {
+          try {
+            const expEnd = addMonths(projectStartDateObj, horizonMonths);
+            const diffDays = differenceInDays(repaymentDateObj, expEnd);
+            // If ended at least 25 days before expected horizon -> en anticipation
+            // If ended at least 25 days after expected horizon -> en retard
+            // Otherwise -> dans les délais (on_time)
+            if (diffDays <= -25) {
+              repaymentTimingStatus = 'anticipation';
+              repaymentTimingLabel = `en anticipation le ${finalRepaymentDate}`;
+            } else if (diffDays >= 25) {
+              repaymentTimingStatus = 'retard';
+              repaymentTimingLabel = `en retard le ${finalRepaymentDate}`;
+            } else {
+              repaymentTimingStatus = 'on_time';
+              repaymentTimingLabel = `le ${finalRepaymentDate}`;
+            }
+          } catch (e) {
+            repaymentTimingLabel = `le ${finalRepaymentDate}`;
+          }
+        } else {
+          repaymentTimingLabel = `le ${finalRepaymentDate}`;
+        }
       }
     }
 
@@ -394,11 +520,18 @@ export const calculateStats = (
       capitalGain,
       totalRevenues,
       netRevenues,
+      commercialAdjustments,
       periodSales,
       yield: yieldVal,
       annualYield,
       firstInvestmentDate,
+      firstRevenueDate,
+      daysBeforeFirstRevenue,
       capitalZeroDate,
+      finalRepaymentDate,
+      repaymentTimingStatus,
+      repaymentTimingLabel,
+      expectedEndDate,
       investmentDurationText,
       projectOpeningDate,
       transactions: txs,
@@ -407,6 +540,11 @@ export const calculateStats = (
       currentBrickPrice,
       averageBuyBrickPrice,
       costForOwnedBricks,
+      totalBoughtBricks,
+      totalPurchaseCost,
+      historicalAverageBuyBrickPrice,
+      netCostForOwnedBricks,
+      netBrickPrice,
       currentTotalValue,
       latentCapitalGain,
       latentCapitalGainPercent
@@ -521,6 +659,10 @@ export const calculateStats = (
   let periodObligationRevenues = 0;
   let periodBoostedBalance = 0;
   let periodReferralBonuses = 0;
+  let periodCommercialAdjustments = 0;
+  let totalCommercialAdjustments = 0;
+  let periodCommercialAdjustmentsCount = 0;
+  let totalCommercialAdjustmentsCount = 0;
 
   // Bricks Company Investment Calculation
   let bricksCompanyInvested = 0;
@@ -550,18 +692,18 @@ export const calculateStats = (
     const isBeforeStart = startDate && isBefore(tDate, startOfDay(startDate));
     const isBeforeEnd = !endDate || isBefore(tDate, endOfDay(endDate)) || tDate.getTime() === endOfDay(endDate).getTime();
 
-    const normType = (t.type || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const normType = normalizeTransactionType(t.type);
     const normProp = (t.propriété || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     const propName = t.propriété || "Autre (Boost/Frais)";
-    const isReventeTotale = normType.includes("revente totale") || normType.includes("revente-totale");
+    const isReventeTotale = isTotalResaleType(t.type);
 
     const currentCap = globalPropCapTracker.get(propName) || 0;
     const capitalRestant = currentCap;
 
     if (propName !== "Autre (Boost/Frais)") {
-      if (normType.includes("achat")) {
+      if (isPurchaseType(t.type)) {
         globalPropCapTracker.set(propName, currentCap + amount);
-      } else if (!normType.includes("revenus") && (normType.includes("vente") || normType.includes("remboursement"))) {
+      } else if (!isRevenueType(t.type) && isRepaymentOrSaleType(t.type)) {
         globalPropCapTracker.set(propName, Math.max(0, currentCap - amount));
       }
       if (isReventeTotale) {
@@ -575,15 +717,19 @@ export const calculateStats = (
     if (isBeforeEnd) {
       currentSolde += delta;
 
+      const isCommercialAdj = normType === TransactionType.AJUSTEMENT_COMMERCIAL || (typeof normType === 'string' && normType.toLowerCase().includes("ajustement"));
+      if (isCommercialAdj) {
+        totalCommercialAdjustments += amount;
+        totalCommercialAdjustmentsCount++;
+      }
+
       const isBricksCompany = 
-        normType.includes("investissement dans la societe bricks") ||
-        normType.includes("societe bricks") ||
-        normProp.includes("investissement dans la societe bricks") ||
-        normProp.includes("societe bricks") ||
-        (normType.includes("investissement") && (normType.includes("bricks") || normProp.includes("bricks")));
+        normType === TransactionType.INVESTISSEMENT_SOCIETE_BRICKS ||
+        normType === TransactionType.REMBOURSEMENT_SOCIETE_BRICKS ||
+        normProp.includes("societe bricks");
 
       if (isBricksCompany) {
-        if (normType.includes("remboursement")) {
+        if (normType === TransactionType.REMBOURSEMENT_SOCIETE_BRICKS || (typeof normType === 'string' && normType.toLowerCase().includes("remboursement"))) {
           bricksCompanyRefunded += amount;
         } else {
           bricksCompanyInvested += amount;
@@ -596,30 +742,24 @@ export const calculateStats = (
                       (!endDate || isBefore(tDate, endOfDay(endDate)) || tDate.getTime() === endOfDay(endDate).getTime());
 
     if (isInRange) {
-      const norm = normType;
-      if (norm.includes("carte cadeau"))
-      {
-        if (norm.includes("achat"))
-        {
-          periodGiftCardsOut += amount;
-          periodCashOut += amount;
-        }
-        else if (norm.includes("utilisation"))
-        {
-          periodGiftCardsIn += amount;
-          periodCashIn += amount;
-        }
-      }
-      else if (norm.includes("credit") || norm.includes("depot") || norm.includes("recharge") || norm.includes("alimentation")) {
+      if (normType === TransactionType.ACHAT_CARTE_CADEAU) {
+        periodGiftCardsOut += amount;
+        periodCashOut += amount;
+      } else if (normType === TransactionType.UTILISATION_CARTE_CADEAU) {
+        periodGiftCardsIn += amount;
         periodCashIn += amount;
-      } else if (norm.includes("retrait")) {
+      } else if (normType === TransactionType.CREDIT_CARTE || normType === TransactionType.CREDIT_VIREMENT) {
+        periodCashIn += amount;
+      } else if (normType === TransactionType.RETRAIT) {
         periodCashOut += amount;
         periodBankWithdrawals += amount;
       }
-      if (norm.includes("frais")) {
+
+      if (isFeeType(t.type)) {
         periodFees += amount;
       }
-      if (norm.includes("prelevement") || norm.includes("impot") || norm.includes("tax")) {
+      // Fiscalité
+      if (isTaxType(t.type)) {
         periodTaxes += amount;
       }
 
@@ -634,14 +774,21 @@ export const calculateStats = (
 
       const isObligation = normContract.includes("obligation") || normContract.includes("loan") || normContract.includes("pret") ||
                            metaContract.includes("obligation") || metaContract.includes("loan") || metaContract.includes("pret") ||
-                           norm.includes("obligation") || norm.includes("interet") || normProp.includes("obligation");
+                           (typeof normType === 'string' && normType.toLowerCase().includes("obligation")) || normProp.includes("obligation");
 
       if (!isReventeTotale) {
-        if (norm.includes("parrainage")) {
+        if (normType === TransactionType.AJUSTEMENT_COMMERCIAL || (typeof normType === 'string' && normType.toLowerCase().includes("ajustement"))) {
+          periodCommercialAdjustments += amount;
+          periodCommercialAdjustmentsCount++;
+        } else if (
+          normType === TransactionType.PARRAINAGE_PARRAIN ||
+          normType === TransactionType.PARRAINAGE_FILLEUL ||
+          normType === TransactionType.PARRAINAGE_GENERIQUE
+        ) {
           periodReferralBonuses += amount;
-        } else if (norm.includes("solde booste") || norm.includes("boost")) {
+        } else if (normType === TransactionType.SOLDE_BOOSTE) {
           periodBoostedBalance += amount;
-        } else if (norm.includes("revenus") || norm.includes("loyer") || norm.includes("royalt") || norm.includes("obligation") || norm.includes("interet") || norm.includes("coupon")) {
+        } else if (isRevenueType(t.type)) {
           if (isObligation) {
             periodObligationRevenues += amount;
           } else {
@@ -674,7 +821,10 @@ export const calculateStats = (
 
   // Global investment duration
   const allPurchaseTxs = validTransactions
-    .filter(t => t.type && t.type.toLowerCase().includes("achat"))
+    .filter(t => {
+      const norm = (t.type || '').toLowerCase();
+      return norm.includes("achat") || norm.includes("investissement");
+    })
     .sort((a, b) => parseDate(a.date).getTime() - parseDate(b.date).getTime());
   
   const earliestGlobalTx = allPurchaseTxs[0] || [...validTransactions].sort((a, b) => parseDate(a.date).getTime() - parseDate(b.date).getTime())[0];
@@ -682,12 +832,25 @@ export const calculateStats = (
   
   let globalInvestmentDurationText: string | undefined = undefined;
   let globalFirstInvestmentDate: string | undefined = undefined;
+  let globalAccountAgeText: string | undefined = undefined;
 
   if (earliestGlobalDateObj) {
     globalFirstInvestmentDate = earliestGlobalTx ? earliestGlobalTx.date : undefined;
+    globalAccountAgeText = formatInvestmentDuration(earliestGlobalDateObj, now);
     const globalStart = startDate && isAfter(startDate, earliestGlobalDateObj) ? startDate : earliestGlobalDateObj;
     const globalEnd = endDate && isBefore(endDate, now) ? endDate : now;
     globalInvestmentDurationText = formatInvestmentDuration(globalStart, globalEnd);
+  }
+
+  // Calculate average days before 1st revenue across all projects with at least 1 revenue
+  const realProperties = properties.filter(p => !p.name.toLowerCase().includes("autre") && p.totalInvested > 0);
+  const projectsWithFirstRevenue = realProperties.filter(p => p.daysBeforeFirstRevenue !== undefined);
+  let averageDaysBeforeFirstRevenue: number | undefined = undefined;
+  const projectsWithRevenueCount = projectsWithFirstRevenue.length;
+
+  if (projectsWithFirstRevenue.length > 0) {
+    const totalDays = projectsWithFirstRevenue.reduce((acc, p) => acc + (p.daysBeforeFirstRevenue || 0), 0);
+    averageDaysBeforeFirstRevenue = Math.round(totalDays / projectsWithFirstRevenue.length);
   }
 
   return {
@@ -702,6 +865,10 @@ export const calculateStats = (
       periodObligationRevenues,
       periodBoostedBalance,
       periodReferralBonuses,
+      periodCommercialAdjustments: Math.round(periodCommercialAdjustments * 100) / 100,
+      totalCommercialAdjustments: Math.round(totalCommercialAdjustments * 100) / 100,
+      periodCommercialAdjustmentsCount,
+      totalCommercialAdjustmentsCount,
       totalPeriodSales,
       periodCashIn,
       periodCashOut,
@@ -719,7 +886,10 @@ export const calculateStats = (
       averageYield,
       averageAnnualYield,
       firstInvestmentDate: globalFirstInvestmentDate,
+      accountAgeText: globalAccountAgeText,
       investmentDurationText: globalInvestmentDurationText,
+      averageDaysBeforeFirstRevenue,
+      projectsWithRevenueCount,
       startSolde,
       currentSolde,
       totalStartBalanceAndInvestments,
@@ -875,3 +1045,145 @@ export const getPatrimoineTimeline = (
     patrimoine: item.patrimoine
   })).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
 };
+
+export const getPropertyTimeline = (
+  propertyTransactions: Transaction[]
+): PropertyTimelinePoint[] => {
+  const validTransactions = propertyTransactions.filter(t => t.statut === "Validée");
+  if (validTransactions.length === 0) return [];
+
+  // Sort ascending by parsed date
+  const sortedAsc = [...validTransactions].map((t, originalIdx) => ({
+    ...t,
+    originalIdx,
+    parsedDate: parseDate(t.date)
+  })).sort((a, b) => {
+    const diff = a.parsedDate.getTime() - b.parsedDate.getTime();
+    if (diff !== 0) return diff;
+    return a.originalIdx - b.originalIdx;
+  });
+
+  let runningCapital = 0;
+  let cumulativeRevenue = 0;
+
+  // Group by month YYYY-MM
+  const monthMap = new Map<string, {
+    dateObj: Date;
+    dateStr: string;
+    monthlyRevenue: number;
+    cumulativeRevenue: number;
+    capital: number;
+    periodInvestment: number;
+    periodRepayment: number;
+  }>();
+
+  sortedAsc.forEach(t => {
+    const rawVal = typeof t["montant (€)"] === "number"
+      ? t["montant (€)"]
+      : parseFloat(String(t["montant (€)"] || "0").replace(",", "."));
+    
+    if (isNaN(rawVal)) return;
+    const amount = Math.abs(rawVal);
+    const normalizedType = normalizeTransactionType(t.type);
+
+    let monthlyRevDelta = 0;
+    let invDelta = 0;
+    let repDelta = 0;
+
+    if (isPurchaseType(t.type)) {
+      runningCapital += amount;
+      invDelta += amount;
+    } else if (isRepaymentOrSaleType(t.type)) {
+      runningCapital = Math.max(0, runningCapital - amount);
+      repDelta += amount;
+    }
+
+    if (isTotalResaleType(t.type)) {
+      runningCapital = 0;
+    }
+
+    if (isRevenueType(t.type)) {
+      monthlyRevDelta += amount;
+      cumulativeRevenue += amount;
+    }
+
+    if (normalizedType === TransactionType.AJUSTEMENT_COMMERCIAL) {
+      monthlyRevDelta += amount;
+      cumulativeRevenue += amount;
+    }
+
+    const monthKey = format(t.parsedDate, "yyyy-MM");
+    const existing = monthMap.get(monthKey);
+
+    if (existing) {
+      existing.monthlyRevenue += monthlyRevDelta;
+      existing.cumulativeRevenue = cumulativeRevenue;
+      existing.capital = runningCapital;
+      existing.periodInvestment += invDelta;
+      existing.periodRepayment += repDelta;
+      if (isAfter(t.parsedDate, existing.dateObj)) {
+        existing.dateObj = t.parsedDate;
+        existing.dateStr = t.date;
+      }
+    } else {
+      monthMap.set(monthKey, {
+        dateObj: t.parsedDate,
+        dateStr: t.date,
+        monthlyRevenue: monthlyRevDelta,
+        cumulativeRevenue,
+        capital: runningCapital,
+        periodInvestment: invDelta,
+        periodRepayment: repDelta
+      });
+    }
+  });
+
+  const monthKeys = Array.from(monthMap.keys()).sort();
+  if (monthKeys.length === 0) return [];
+
+  const firstDate = monthMap.get(monthKeys[0])!.dateObj;
+  const lastDate = monthMap.get(monthKeys[monthKeys.length - 1])!.dateObj;
+
+  const result: PropertyTimelinePoint[] = [];
+  let curr = startOfMonth(firstDate);
+  const end = startOfMonth(lastDate);
+
+  let prevCapital = 0;
+  let prevCumulativeRevenue = 0;
+
+  while (!isAfter(curr, end)) {
+    const key = format(curr, "yyyy-MM");
+    const monthData = monthMap.get(key);
+
+    if (monthData) {
+      prevCapital = monthData.capital;
+      prevCumulativeRevenue = monthData.cumulativeRevenue;
+      result.push({
+        date: monthData.dateStr,
+        formattedDate: format(curr, "MM/yy"),
+        dateObj: monthData.dateObj,
+        monthlyRevenue: Math.round(monthData.monthlyRevenue * 100) / 100,
+        cumulativeRevenue: Math.round(monthData.cumulativeRevenue * 100) / 100,
+        capital: Math.round(monthData.capital * 100) / 100,
+        periodInvestment: Math.round(monthData.periodInvestment * 100) / 100,
+        periodRepayment: Math.round(monthData.periodRepayment * 100) / 100
+      });
+    } else {
+      result.push({
+        date: format(endOfMonth(curr), "dd/MM/yyyy"),
+        formattedDate: format(curr, "MM/yy"),
+        dateObj: endOfMonth(curr),
+        monthlyRevenue: 0,
+        cumulativeRevenue: Math.round(prevCumulativeRevenue * 100) / 100,
+        capital: Math.round(prevCapital * 100) / 100,
+        periodInvestment: 0,
+        periodRepayment: 0
+      });
+    }
+
+    curr = addMonths(curr, 1);
+  }
+
+  return result;
+};
+

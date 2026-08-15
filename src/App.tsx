@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { Transaction, PropertyStats, ProjectMetadata, ProjectGroup } from './types';
-import { calculateStats, getAvailableYears, getSoldeImpact, parseDate, getPatrimoineTimeline } from './services/dataService';
+import { Transaction, PropertyStats, ProjectMetadata, ProjectGroup, PropertyTimelinePoint, TransactionType, isPurchaseType, isRevenueType, isRepaymentOrSaleType, isFeeType, isTaxType, normalizeTransactionType } from './types';
+import { calculateStats, getAvailableYears, getSoldeImpact, parseDate, getPatrimoineTimeline, getPropertyTimeline } from './services/dataService';
 import * as XLSX from 'xlsx';
 import { startOfYear, endOfYear, startOfQuarter, endOfQuarter, startOfMonth, endOfMonth, subMonths, subYears, parse, isAfter, isBefore, startOfDay, endOfDay } from 'date-fns';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
-  PieChart, Pie, Legend, LineChart, Line
+  PieChart, Pie, Legend, LineChart, Line, ComposedChart
 } from 'recharts';
 import { 
   LayoutDashboard, 
@@ -43,7 +43,8 @@ import {
   Download,
   FileText,
   LogOut,
-  Receipt
+  Receipt,
+  HeartHandshake
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -814,6 +815,34 @@ export default function App() {
                   badge={`${(global.totalOwnedBricks || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} bricks`}
                   description={`avec ${(global.totalOwnedBricks || 0).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} bricks sur ${global.activeProjectsCount} projet${global.activeProjectsCount > 1 ? 's' : ''}`}
                 />
+                <StatCard 
+                  title="1er Investissement" 
+                  value={global.firstInvestmentDate || "-"} 
+                  icon={<Calendar className="text-blue-600" />}
+                  badge={global.accountAgeText ? `${global.accountAgeText}` : undefined}
+                  description={
+                    global.accountAgeText 
+                      ? `Âge du compte : ${global.accountAgeText}` 
+                      : "Date du 1er achat / investissement"
+                  }
+                />
+                {global.averageDaysBeforeFirstRevenue !== undefined && (
+                  <StatCard 
+                    title="Délai Moyen 1er Revenu" 
+                    value={`${global.averageDaysBeforeFirstRevenue} jours`} 
+                    icon={<Clock className="text-amber-600" />}
+                    badge={
+                      global.averageDaysBeforeFirstRevenue >= 25
+                        ? `~${(global.averageDaysBeforeFirstRevenue / 30.4).toFixed(1)} mois`
+                        : undefined
+                    }
+                    description={
+                      global.projectsWithRevenueCount && global.projectsWithRevenueCount > 0
+                        ? `Moyenne sur ${global.projectsWithRevenueCount} projet${global.projectsWithRevenueCount > 1 ? 's' : ''}`
+                        : "Délai moyen constaté avant 1er versement"
+                    }
+                  />
+                )}
                 {global.hasBricksCompanyInvestment && (
                   <StatCard 
                     title="Investissement Société Bricks" 
@@ -875,13 +904,29 @@ export default function App() {
                   value={formatEuro(global.totalNetRevenues)} 
                   icon={<ArrowUpRight className="text-amber-600" />}
                   description={
-                    (global.periodRoyaltyRevenues > 0 || global.periodObligationRevenues > 0 || global.periodBoostedBalance > 0 || global.periodReferralBonuses > 0) ? (
-                      `Royalties (${formatEuro(global.periodRoyaltyRevenues)}) + Obligations (${formatEuro(global.periodObligationRevenues)}) + Solde boosté (${formatEuro(global.periodBoostedBalance)}) + Parrainage (${formatEuro(global.periodReferralBonuses)})`
+                    (global.periodRoyaltyRevenues > 0 || global.periodObligationRevenues > 0 || global.periodBoostedBalance > 0 || global.periodReferralBonuses > 0 || global.periodCommercialAdjustments > 0) ? (
+                      `Royalties (${formatEuro(global.periodRoyaltyRevenues)}) + Obligations (${formatEuro(global.periodObligationRevenues)}) + Solde boosté (${formatEuro(global.periodBoostedBalance)}) + Parrainage (${formatEuro(global.periodReferralBonuses)})${global.periodCommercialAdjustments > 0 ? ` + Ajustements (${formatEuro(global.periodCommercialAdjustments)})` : ''}`
                     ) : (
                       "Royalties, Obligations, Solde boosté & Parrainage"
                     )
                   }
                   trend={global.totalNetRevenues > 0 ? "positive" : "negative"}
+                />
+                <StatCard 
+                  title="Ajustements Commerciaux" 
+                  value={formatEuro(global.periodCommercialAdjustments)} 
+                  icon={<HeartHandshake className="text-amber-600" />}
+                  description={
+                    global.periodCommercialAdjustmentsCount > 0
+                      ? `${global.periodCommercialAdjustmentsCount} transaction(s) sur la période`
+                      : (global.totalCommercialAdjustments > 0 ? `Total historique : ${formatEuro(global.totalCommercialAdjustments)}` : "Gestes & ajustements commerciaux")
+                  }
+                  badge={
+                    global.totalCommercialAdjustments > 0 && filterMode !== 'all' && global.periodCommercialAdjustments !== global.totalCommercialAdjustments
+                      ? `Total : ${formatEuro(global.totalCommercialAdjustments)}`
+                      : undefined
+                  }
+                  trend={global.periodCommercialAdjustments > 0 ? "positive" : undefined}
                 />
                 <StatCard 
                   title="Ventes & Capital Reçu" 
@@ -890,10 +935,10 @@ export default function App() {
                   description="Ventes & Remboursements"
                 />
                 <StatCard 
-                  title="Frais & Impôts" 
+                  title="Frais marketplace & Fiscalité" 
                   value={formatEuro(global.periodFeesAndTaxes)} 
                   icon={<Receipt className="text-rose-600" />}
-                  description={`Frais (${formatEuro(global.periodFees)}) + Impôts (${formatEuro(global.periodTaxes)})`}
+                  description={`Frais marketplace (${formatEuro(global.periodFees)}) + Fiscalité (${formatEuro(global.periodTaxes)})`}
                   trend={global.periodFeesAndTaxes > 0 ? "negative" : undefined}
                 />
                 <StatCard 
@@ -1388,6 +1433,7 @@ export default function App() {
                           const isCancelledOrRefused = normStatut.includes("refus") || normStatut.includes("annul");
 
                           const isSoldeBooste = normType.includes("solde boosté");
+                          const isCommercialAdj = normType.includes("ajustement commercial") || normType.includes("ajustement");
                           const isRevenue = normType.includes("revenus") || normType.includes("parrainage");
                           const isPurchase = normType.includes("achat") && !normType.includes("frais");
                           const isSale = normType.includes("vente") || normType.includes("remboursement") || normType.includes("revente");
@@ -1402,6 +1448,7 @@ export default function App() {
                               <td className="px-6 py-3 text-xs font-semibold">
                                 <span className={cn(
                                   "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] border font-medium",
+                                  isCommercialAdj ? "bg-amber-50 text-amber-800 border-amber-200" :
                                   isRevenue ? "bg-emerald-50 text-emerald-700 border-emerald-100" :
                                   isSoldeBooste ? "bg-yellow-50 text-yellow-700 border-yellow-100" :
                                   isPurchase ? "bg-blue-50 text-blue-700 border-blue-100" :
@@ -1665,26 +1712,30 @@ function PropertyDetail({
 
   const [detailTxCategory, setDetailTxCategory] = useState<'all' | 'purchases' | 'revenues' | 'sales'>('all');
   const [detailTxSearch, setDetailTxSearch] = useState('');
+  const [propertyRevenueMode, setPropertyRevenueMode] = useState<'cumulative' | 'monthly' | 'both'>('cumulative');
+
+  const propertyTimeline = useMemo(() => {
+    return getPropertyTimeline(sortedTxs);
+  }, [sortedTxs]);
 
   const filteredDetailTxs = useMemo(() => {
     return sortedTxs.filter(t => {
-      const normType = (t.type || '').toLowerCase();
       const q = detailTxSearch.trim().toLowerCase();
       const matchesSearch = !q || 
-        normType.includes(q) || 
+        (t.type || '').toLowerCase().includes(q) || 
         t.date.includes(q) || 
         (t.statut || '').toLowerCase().includes(q);
 
       if (!matchesSearch) return false;
 
       if (detailTxCategory === 'purchases') {
-        return normType.includes("achat");
+        return isPurchaseType(t.type);
       }
       if (detailTxCategory === 'revenues') {
-        return (normType.includes("revenus") || normType.includes("solde boosté") || normType.includes("parrainage") || normType.includes("loyer")) && !normType.includes("revente");
+        return isRevenueType(t.type);
       }
       if (detailTxCategory === 'sales') {
-        return normType.includes("vente") || normType.includes("remboursement") || normType.includes("revente");
+        return isRepaymentOrSaleType(t.type);
       }
       return true;
     });
@@ -1794,13 +1845,33 @@ function PropertyDetail({
               {isRefundedOrSold && (
                 <div className={cn(
                   "flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-lg border shadow-xs",
-                  plusMoinsValue >= 0 
-                    ? "bg-emerald-50 text-emerald-800 border-emerald-200" 
-                    : "bg-rose-50 text-rose-800 border-rose-200"
+                  property.repaymentTimingStatus === 'retard'
+                    ? "bg-amber-50 text-amber-800 border-amber-300"
+                    : plusMoinsValue >= 0 
+                      ? "bg-emerald-50 text-emerald-800 border-emerald-200" 
+                      : "bg-rose-50 text-rose-800 border-rose-200"
                 )}>
-                  <TrendingUp size={14} className={plusMoinsValue >= 0 ? "text-emerald-600" : "text-rose-600"} />
+                  <TrendingUp size={14} className={
+                    property.repaymentTimingStatus === 'retard'
+                      ? "text-amber-600"
+                      : plusMoinsValue >= 0 ? "text-emerald-600" : "text-rose-600"
+                  } />
                   <span>
                     Projet revendu / remboursé
+                    {(property.finalRepaymentDate || property.capitalZeroDate) && (
+                      <>
+                        {" • "}
+                        {property.repaymentTimingStatus === 'anticipation' && (
+                          <span className="text-emerald-700 font-extrabold">en anticipation le {property.finalRepaymentDate || property.capitalZeroDate}</span>
+                        )}
+                        {property.repaymentTimingStatus === 'retard' && (
+                          <span className="text-amber-800 font-extrabold">en retard le {property.finalRepaymentDate || property.capitalZeroDate}</span>
+                        )}
+                        {(property.repaymentTimingStatus === 'on_time' || !property.repaymentTimingStatus) && (
+                          <span>le {property.finalRepaymentDate || property.capitalZeroDate}</span>
+                        )}
+                      </>
+                    )}
                     {isRoyalty ? ` • Plus/Moins-value : ${plusMoinsValue >= 0 ? '+' : ''}${formatEuro(plusMoinsValue)}` : ''}
                   </span>
                 </div>
@@ -2004,12 +2075,7 @@ function PropertyDetail({
       )}
 
       {/* Stat Cards */}
-      <div className={cn(
-        "grid grid-cols-2 md:grid-cols-4 gap-4", 
-        isRoyalty 
-          ? (isRefundedOrSold ? "lg:grid-cols-9" : "lg:grid-cols-8")
-          : "lg:grid-cols-7"
-      )}>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
         <StatCard 
           title="Capital (Début)" 
           value={formatEuro(property.startCapital)} 
@@ -2032,11 +2098,21 @@ function PropertyDetail({
             value={property.investmentDurationText || '-'} 
             icon={<Clock className="text-indigo-600" />}
             description={
-              property.firstInvestmentDate && property.capitalZeroDate
-                ? `${property.firstInvestmentDate} → ${property.capitalZeroDate}`
+              property.repaymentTimingStatus === 'anticipation'
+                ? `Remboursé en anticipation le ${property.finalRepaymentDate || property.capitalZeroDate}`
+                : property.repaymentTimingStatus === 'retard'
+                ? `Remboursé en retard le ${property.finalRepaymentDate || property.capitalZeroDate}`
+                : property.firstInvestmentDate && (property.finalRepaymentDate || property.capitalZeroDate)
+                ? `${property.firstInvestmentDate} → ${property.finalRepaymentDate || property.capitalZeroDate}`
                 : "Du 1er achat au capital à 0"
             }
-            badge="Prêt terminé"
+            badge={
+              property.repaymentTimingStatus === 'anticipation'
+                ? "En anticipation"
+                : property.repaymentTimingStatus === 'retard'
+                ? "En retard"
+                : "Prêt terminé"
+            }
           />
         ) : (
           <StatCard 
@@ -2062,12 +2138,49 @@ function PropertyDetail({
           description="Achats cumulés"
         />
         <StatCard 
+          title="Prix de Revient (PRU)" 
+          value={formatEuro(property.costForOwnedBricks > 0 ? property.costForOwnedBricks : (property.totalPurchaseCost || property.totalInvested))} 
+          icon={<Coins className="text-amber-600" />}
+          badge={
+            property.ownedBricks > 0
+              ? `${formatEuro(property.averageBuyBrickPrice)} / brique`
+              : property.historicalAverageBuyBrickPrice
+              ? `${formatEuro(property.historicalAverageBuyBrickPrice)} / brique`
+              : undefined
+          }
+          description={
+            property.ownedBricks > 0
+              ? `PRU moyen de ${property.ownedBricks} brique${property.ownedBricks > 1 ? 's' : ''}`
+              : `Coût d'achat total (${property.totalBoughtBricks || '-'} briques)`
+          }
+        />
+        <StatCard 
           title="Revenus Nets" 
           value={formatEuro(property.netRevenues)} 
           icon={<ArrowUpRight className="text-amber-600" />}
           description="Loyers & Intérêts"
           trend={property.netRevenues > 0 ? "positive" : "negative"}
         />
+        {property.daysBeforeFirstRevenue !== undefined ? (
+          <StatCard 
+            title="Délai 1er Revenu" 
+            value={`${property.daysBeforeFirstRevenue} j`} 
+            icon={<Clock className="text-amber-600" />}
+            badge={property.firstRevenueDate ? `le ${property.firstRevenueDate}` : undefined}
+            description={
+              property.firstInvestmentDate && property.firstRevenueDate
+                ? `${property.firstInvestmentDate} → ${property.firstRevenueDate}`
+                : "Délai avant 1er versement de revenu"
+            }
+          />
+        ) : (
+          <StatCard 
+            title="Délai 1er Revenu" 
+            value="En attente" 
+            icon={<Clock className="text-slate-400" />}
+            description="Aucun revenu perçu à ce jour"
+          />
+        )}
         <StatCard 
           title="Ventes" 
           value={formatEuro(property.periodSales)} 
@@ -2092,6 +2205,193 @@ function PropertyDetail({
         />
       </div>
 
+      {/* Graphique : Revenus en fonction du temps & Total En-cours (Capital) */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <TrendingUp size={20} className="text-blue-600" />
+              Évolution des Revenus & Total En-cours (Capital)
+            </h3>
+            <p className="text-xs text-slate-400 font-medium mt-0.5">
+              Suivi chronologique des revenus perçus (axe droit) et du capital restant investi (axe gauche)
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Revenue view mode toggle */}
+            <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-semibold">
+              <button
+                onClick={() => setPropertyRevenueMode('cumulative')}
+                className={cn(
+                  "px-3 py-1.5 rounded-lg transition-all cursor-pointer",
+                  propertyRevenueMode === 'cumulative'
+                    ? "bg-white text-emerald-700 shadow-sm font-bold"
+                    : "text-slate-500 hover:text-slate-800"
+                )}
+              >
+                Revenus cumulés
+              </button>
+              <button
+                onClick={() => setPropertyRevenueMode('monthly')}
+                className={cn(
+                  "px-3 py-1.5 rounded-lg transition-all cursor-pointer",
+                  propertyRevenueMode === 'monthly'
+                    ? "bg-white text-emerald-700 shadow-sm font-bold"
+                    : "text-slate-500 hover:text-slate-800"
+                )}
+              >
+                Revenus mensuels
+              </button>
+              <button
+                onClick={() => setPropertyRevenueMode('both')}
+                className={cn(
+                  "px-3 py-1.5 rounded-lg transition-all cursor-pointer",
+                  propertyRevenueMode === 'both'
+                    ? "bg-white text-emerald-700 shadow-sm font-bold"
+                    : "text-slate-500 hover:text-slate-800"
+                )}
+              >
+                Les deux
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {propertyTimeline.length > 0 ? (
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={propertyTimeline} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis 
+                  dataKey="formattedDate" 
+                  tickLine={false} 
+                  stroke="#94a3b8" 
+                  fontSize={12} 
+                />
+                <YAxis 
+                  yAxisId="left" 
+                  orientation="left" 
+                  tickFormatter={(val) => `${val}€`} 
+                  stroke="#3b82f6" 
+                  fontSize={12} 
+                  tickLine={false}
+                  axisLine={{ stroke: '#e2e8f0' }}
+                />
+                <YAxis 
+                  yAxisId="right" 
+                  orientation="right" 
+                  tickFormatter={(val) => `${val}€`} 
+                  stroke="#10b981" 
+                  fontSize={12} 
+                  tickLine={false}
+                  axisLine={{ stroke: '#e2e8f0' }}
+                />
+                <Tooltip 
+                  content={({ active, payload }) => {
+                    if (!active || !payload || !payload.length) return null;
+                    const dataPoint = payload[0]?.payload as PropertyTimelinePoint;
+                    if (!dataPoint) return null;
+
+                    return (
+                      <div className="bg-white p-3.5 rounded-xl border border-slate-100 shadow-xl text-xs font-medium space-y-2 min-w-[220px]">
+                        <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
+                          <span className="font-bold text-slate-800">Mois : {dataPoint.formattedDate}</span>
+                          <span className="text-[11px] text-slate-400 font-mono">{dataPoint.date}</span>
+                        </div>
+                        
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-blue-600" />
+                              <span className="text-slate-600">Total En-cours (Capital) :</span>
+                            </div>
+                            <span className="font-bold font-mono text-blue-600">{formatEuro(dataPoint.capital)}</span>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                              <span className="text-slate-600">Revenus cumulés :</span>
+                            </div>
+                            <span className="font-bold font-mono text-emerald-600">+{formatEuro(dataPoint.cumulativeRevenue)}</span>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                              <span className="text-slate-600">Revenus du mois :</span>
+                            </div>
+                            <span className="font-bold font-mono text-slate-900">+{formatEuro(dataPoint.monthlyRevenue)}</span>
+                          </div>
+
+                          {dataPoint.periodInvestment !== undefined && dataPoint.periodInvestment > 0 && (
+                            <div className="flex items-center justify-between gap-4 pt-1 border-t border-slate-100 text-[11px]">
+                              <span className="text-slate-500">Investissement / Achat :</span>
+                              <span className="font-bold font-mono text-blue-700">+{formatEuro(dataPoint.periodInvestment)}</span>
+                            </div>
+                          )}
+
+                          {dataPoint.periodRepayment !== undefined && dataPoint.periodRepayment > 0 && (
+                            <div className="flex items-center justify-between gap-4 pt-1 border-t border-slate-100 text-[11px]">
+                              <span className="text-slate-500">Remboursement / Vente :</span>
+                              <span className="font-bold font-mono text-indigo-700">-{formatEuro(dataPoint.periodRepayment)}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }}
+                />
+                <Legend verticalAlign="top" height={36} />
+
+                {/* Courbe 1: Total En-cours (Capital) */}
+                <Line 
+                  yAxisId="left"
+                  type="monotone" 
+                  dataKey="capital" 
+                  name="Total En-cours (Capital)" 
+                  stroke="#2563eb" 
+                  strokeWidth={3} 
+                  dot={propertyTimeline.length < 30} 
+                  activeDot={{ r: 6 }} 
+                />
+
+                {/* Courbe 2: Revenus (Cumulés et/ou Mensuels) */}
+                {(propertyRevenueMode === 'cumulative' || propertyRevenueMode === 'both') && (
+                  <Line 
+                    yAxisId="right"
+                    type="monotone" 
+                    dataKey="cumulativeRevenue" 
+                    name="Revenus Cumulés" 
+                    stroke="#10b981" 
+                    strokeWidth={2.5} 
+                    dot={propertyTimeline.length < 30} 
+                    activeDot={{ r: 5 }} 
+                  />
+                )}
+
+                {(propertyRevenueMode === 'monthly' || propertyRevenueMode === 'both') && (
+                  <Bar 
+                    yAxisId="right"
+                    dataKey="monthlyRevenue" 
+                    name="Revenus Mensuels" 
+                    fill="#f59e0b" 
+                    radius={[4, 4, 0, 0]}
+                    maxBarSize={40}
+                  />
+                )}
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="h-60 flex flex-col items-center justify-center text-center p-6 bg-slate-50/70 rounded-xl border border-dashed border-slate-200">
+            <Coins size={28} className="text-slate-400 mb-2" />
+            <p className="text-sm font-semibold text-slate-600">Aucune donnée temporelle disponible pour ce projet</p>
+          </div>
+        )}
+      </div>
+
       {/* Project Details Section */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
@@ -2107,6 +2407,20 @@ function PropertyDetail({
               </span>
             } />
             <DetailItem label="Prix brique actuel" value={formatEuro(property.currentBrickPrice)} />
+            <DetailItem 
+              label="Prix de revient (PRU)" 
+              value={`${formatEuro(property.ownedBricks > 0 ? property.averageBuyBrickPrice : (property.historicalAverageBuyBrickPrice || 10))} / br.`} 
+            />
+            <DetailItem 
+              label="Coût de revient total" 
+              value={formatEuro(property.costForOwnedBricks > 0 ? property.costForOwnedBricks : (property.totalPurchaseCost || property.totalInvested))} 
+            />
+            {property.ownedBricks > 0 && property.netRevenues > 0 && (
+              <DetailItem 
+                label="Prix de revient net (après loyers)" 
+                value={`${formatEuro(property.netCostForOwnedBricks !== undefined ? property.netCostForOwnedBricks : Math.max(0, property.costForOwnedBricks - property.netRevenues))} (${formatEuro(property.netBrickPrice || ((property.costForOwnedBricks - property.netRevenues) / property.ownedBricks))} / br.)`} 
+              />
+            )}
             {isRoyalty && (
               <DetailItem label="Plus/Moins-value latente" value={`${property.latentCapitalGain >= 0 ? '+' : ''}${formatEuro(property.latentCapitalGain)}`} />
             )}
@@ -2116,14 +2430,40 @@ function PropertyDetail({
             {property.firstInvestmentDate && (
               <DetailItem label="Mon 1er achat" value={property.firstInvestmentDate} />
             )}
-            {isRefundedOrSold && property.capitalZeroDate && (
-              <DetailItem label="Fin du prêt (Capital 0 €)" value={property.capitalZeroDate} />
+            {property.daysBeforeFirstRevenue !== undefined ? (
+              <DetailItem 
+                label="Délai avant 1er revenu" 
+                value={`${property.daysBeforeFirstRevenue} jours${property.firstRevenueDate ? ` (le ${property.firstRevenueDate})` : ''}`} 
+              />
+            ) : (
+              <DetailItem 
+                label="Délai avant 1er revenu" 
+                value="En attente (aucun versement)" 
+              />
+            )}
+            {isRefundedOrSold && (property.finalRepaymentDate || property.capitalZeroDate) && (
+              <DetailItem 
+                label="Remboursement final" 
+                value={
+                  property.repaymentTimingStatus === 'anticipation'
+                    ? `En anticipation le ${property.finalRepaymentDate || property.capitalZeroDate}`
+                    : property.repaymentTimingStatus === 'retard'
+                    ? `En retard le ${property.finalRepaymentDate || property.capitalZeroDate}`
+                    : `Le ${property.finalRepaymentDate || property.capitalZeroDate}`
+                } 
+              />
             )}
             {isRefundedOrSold && property.investmentDurationText && (
               <DetailItem label="Durée réelle du prêt" value={property.investmentDurationText} />
             )}
+            {meta?.investmentHorizonInMonths && (
+              <DetailItem label="Horizon initial prévu" value={`${meta.investmentHorizonInMonths} mois`} />
+            )}
             <DetailItem label="Rendement Total" value={formatPercent(property.yield)} />
             <DetailItem label="Rendement Annuel" value={`${formatPercent(property.annualYield)} / an`} />
+            {property.commercialAdjustments !== undefined && property.commercialAdjustments > 0 && (
+              <DetailItem label="Ajustement commercial" value={`+${formatEuro(property.commercialAdjustments)}`} />
+            )}
             {isRefundedOrSold && isRoyalty && (
               <DetailItem label="Plus / Moins-value (Revente)" value={`${plusMoinsValue >= 0 ? '+' : ''}${formatEuro(plusMoinsValue)}`} />
             )}
@@ -2313,9 +2653,11 @@ function PropertyDetail({
                     <td className="px-6 py-4">
                       <span className={cn(
                         "px-2.5 py-1 rounded-full text-[10px] font-bold uppercase",
-                        t.type.includes("Achat") ? "bg-blue-50 text-blue-600" :
-                        t.type.includes("Revenus") ? "bg-emerald-50 text-emerald-600" :
-                        t.type.includes("Remboursement") ? "bg-amber-50 text-amber-600" :
+                        isPurchaseType(t.type) ? "bg-blue-50 text-blue-600" :
+                        isRevenueType(t.type) ? "bg-emerald-50 text-emerald-600" :
+                        isRepaymentOrSaleType(t.type) ? "bg-indigo-50 text-indigo-600" :
+                        isFeeType(t.type) ? "bg-rose-50 text-rose-600" :
+                        isTaxType(t.type) ? "bg-amber-50 text-amber-600" :
                         "bg-slate-100 text-slate-600"
                       )}>
                         {t.type}
