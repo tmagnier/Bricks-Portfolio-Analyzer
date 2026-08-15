@@ -324,8 +324,16 @@ export default function App() {
   }, []);
 
   const patrimoineTimeline = useMemo(() => 
-    getPatrimoineTimeline(transactions, dateRange.start, dateRange.end),
-  [transactions, dateRange]);
+    getPatrimoineTimeline(transactions, dateRange.start, dateRange.end, projectMetadata),
+  [transactions, dateRange, projectMetadata]);
+
+  const hasRoyaltyCapital = useMemo(() => 
+    patrimoineTimeline.some(p => (p.royaltyCapital || 0) > 0) || (global.totalCurrentRoyaltyCapital || 0) > 0,
+  [patrimoineTimeline, global.totalCurrentRoyaltyCapital]);
+
+  const hasObligationCapital = useMemo(() => 
+    patrimoineTimeline.some(p => (p.obligationCapital || 0) > 0) || (global.totalCurrentObligationCapital || 0) > 0,
+  [patrimoineTimeline, global.totalCurrentObligationCapital]);
 
   const topRevenuesChartData = useMemo(() => {
     const sorted = properties
@@ -505,22 +513,30 @@ export default function App() {
     }
 
     return [...filtered].sort((a, b) => {
-      let valA = a[sortField];
-      let valB = b[sortField];
+      let comparison = 0;
 
-      if (sortField === 'firstInvestmentDate') {
-        const dateA = a.firstInvestmentDate ? parse(a.firstInvestmentDate, "dd/MM/yyyy", new Date()).getTime() : 0;
-        const dateB = b.firstInvestmentDate ? parse(b.firstInvestmentDate, "dd/MM/yyyy", new Date()).getTime() : 0;
-        return sortDirection === 'asc' ? dateA - dateB : dateB - dateA;
+      if (sortField === 'name') {
+        comparison = (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base', numeric: true });
+      } else if (sortField === 'firstInvestmentDate') {
+        const timeA = a.firstInvestmentDate ? parse(a.firstInvestmentDate, "dd/MM/yyyy", new Date()).getTime() : 0;
+        const timeB = b.firstInvestmentDate ? parse(b.firstInvestmentDate, "dd/MM/yyyy", new Date()).getTime() : 0;
+        if (!timeA && !timeB) comparison = 0;
+        else if (!timeA) return 1;
+        else if (!timeB) return -1;
+        else comparison = timeA - timeB;
+      } else if (sortField === 'share') {
+        const valA = Number(a.currentCapital) || 0;
+        const valB = Number(b.currentCapital) || 0;
+        comparison = valA - valB;
+      } else {
+        const rawA = a[sortField as keyof PropertyStats];
+        const rawB = b[sortField as keyof PropertyStats];
+        const valA = typeof rawA === 'number' ? rawA : Number(rawA) || 0;
+        const valB = typeof rawB === 'number' ? rawB : Number(rawB) || 0;
+        comparison = valA - valB;
       }
 
-      if (typeof valA === 'string' && typeof valB === 'string') {
-        return sortDirection === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
-      }
-
-      valA = Number(valA) || 0;
-      valB = Number(valB) || 0;
-      return sortDirection === 'asc' ? valA - valB : valB - valA;
+      return sortDirection === 'asc' ? comparison : -comparison;
     });
   }, [properties, sortField, sortDirection, debouncedSearchQuery]);
 
@@ -929,10 +945,10 @@ export default function App() {
                     />
                     <StatCard 
                       id="card-solde-disponible"
-                      title="Solde Disponible" 
+                      title="Solde non investi" 
                       value={formatEuro(global.currentSolde)} 
                       icon={<Coins className="text-emerald-600" />}
-                      description="Trésorerie non investie"
+                      description="Trésorerie disponible sur votre compte"
                       trend={global.currentSolde > 0 ? "positive" : undefined}
                     />
                     <StatCard 
@@ -1096,7 +1112,7 @@ export default function App() {
                       Évolution du Patrimoine Total, Capital & Solde
                     </h3>
                     <p className="text-xs text-slate-400 font-medium">
-                      Historique mois par mois de votre valorisation globale
+                      Historique mois par mois de votre valorisation globale{hasRoyaltyCapital && hasObligationCapital ? " (avec ventilation Royalties & Obligations)" : ""}
                     </p>
                   </div>
                 </div>
@@ -1109,26 +1125,39 @@ export default function App() {
                         <XAxis dataKey="formattedDate" tickLine={false} stroke="#94a3b8" fontSize={12} />
                         <YAxis tickFormatter={(val) => `${val}€`} stroke="#94a3b8" fontSize={12} tickLine={false} />
                         <Tooltip 
+                          allowEscapeViewBox={{ x: true, y: true }}
+                          wrapperStyle={{ zIndex: 1000 }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload || !payload.length) return null;
                             const dateStr = payload[0]?.payload?.formattedDate || label;
+                            const order = [
+                              "Patrimoine Total", 
+                              "Capital Investi", 
+                              "Capital Royalties", 
+                              "Capital Obligations", 
+                              "Solde Non Investi"
+                            ];
                             const sortedPayload = [...payload].sort((a: any, b: any) => {
-                              const order = ["Patrimoine Total", "Capital Investi", "Solde Non Investi"];
                               return order.indexOf(a.name) - order.indexOf(b.name);
                             });
 
                             return (
-                              <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-xl text-xs font-medium space-y-1.5 min-w-[200px]">
-                                <p className="font-bold text-slate-800 pb-1 border-b border-slate-100">Date : {dateStr}</p>
-                                {sortedPayload.map((item: any, idx: number) => (
-                                  <div key={idx} className="flex items-center justify-between gap-4">
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color || item.stroke }} />
-                                      <span className="text-slate-600">{item.name} :</span>
+                              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xl text-xs font-medium space-y-2 min-w-[220px] max-w-[calc(100vw-32px)] sm:max-w-sm">
+                                <p className="font-bold text-slate-800 pb-1.5 border-b border-slate-100 flex items-center justify-between">
+                                  <span>Date</span>
+                                  <span className="text-slate-500 font-mono">{dateStr}</span>
+                                </p>
+                                <div className="space-y-1.5">
+                                  {sortedPayload.map((item: any, idx: number) => (
+                                    <div key={idx} className="flex items-center justify-between gap-4">
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: item.color || item.stroke }} />
+                                        <span className="text-slate-600">{item.name} :</span>
+                                      </div>
+                                      <span className="font-bold font-mono text-slate-900">{formatEuro(item.value)}</span>
                                     </div>
-                                    <span className="font-bold font-mono text-slate-900">{formatEuro(item.value)}</span>
-                                  </div>
-                                ))}
+                                  ))}
+                                </div>
                               </div>
                             );
                           }}
@@ -1151,6 +1180,28 @@ export default function App() {
                           strokeDasharray="4 4" 
                           dot={false} 
                         />
+                        {hasRoyaltyCapital && (
+                          <Line 
+                            type="monotone" 
+                            dataKey="royaltyCapital" 
+                            name="Capital Royalties" 
+                            stroke="#0284c7" 
+                            strokeWidth={2} 
+                            strokeDasharray="3 3" 
+                            dot={false} 
+                          />
+                        )}
+                        {hasObligationCapital && (
+                          <Line 
+                            type="monotone" 
+                            dataKey="obligationCapital" 
+                            name="Capital Obligations" 
+                            stroke="#9333ea" 
+                            strokeWidth={2} 
+                            strokeDasharray="3 3" 
+                            dot={false} 
+                          />
+                        )}
                         <Line 
                           type="monotone" 
                           dataKey="solde" 
@@ -1174,10 +1225,15 @@ export default function App() {
               {/* Charts */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
                 <div className="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                  <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                    <TrendingUp size={20} className="text-blue-600" />
-                    Répartition par Immeuble (Capital)
-                  </h3>
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-lg font-bold flex items-center gap-2">
+                      <TrendingUp size={20} className="text-blue-600" />
+                      Répartition par Immeuble (Capital)
+                    </h3>
+                    <span className="text-[11px] font-medium text-slate-400 hidden sm:inline-block">
+                      Top 10 des investissements
+                    </span>
+                  </div>
                   <div className="h-80">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={properties.slice(0, 10)}>
@@ -1187,7 +1243,8 @@ export default function App() {
                         <Tooltip 
                           allowEscapeViewBox={{ x: true, y: true }}
                           offset={15}
-                          wrapperStyle={{ zIndex: 1000, pointerEvents: 'none' }}
+                          cursor={{ fill: 'rgba(59, 130, 246, 0.08)' }}
+                          wrapperStyle={{ zIndex: 1000 }}
                           content={({ active, payload }) => {
                             if (!active || !payload || !payload.length) return null;
                             const data = payload[0];
@@ -1201,7 +1258,7 @@ export default function App() {
                             const fillColor = itemIndex !== -1 ? COLORS[itemIndex % COLORS.length] : (data.fill || data.color || '#6366f1');
 
                             return (
-                              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xl text-xs font-medium space-y-2.5 min-w-[250px] max-w-sm pointer-events-none select-none">
+                              <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xl text-xs font-medium space-y-2.5 min-w-[240px] max-w-[calc(100vw-32px)] sm:max-w-sm select-none">
                                 <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
                                   <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: fillColor }} />
                                   <div className="min-w-0 flex-1">
@@ -1242,8 +1299,14 @@ export default function App() {
                                   )}
                                 </div>
 
-                                <div className="pt-1.5 border-t border-slate-100 text-[10px] text-indigo-500 font-medium text-center">
-                                  Cliquez sur la barre pour ouvrir la fiche
+                                <div className="pt-2 border-t border-slate-100">
+                                  <button 
+                                    onClick={() => handleSelectProperty(item)}
+                                    className="w-full py-1.5 px-3 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                                  >
+                                    <span>Voir la fiche de l'immeuble</span>
+                                    <ArrowUpRight size={13} />
+                                  </button>
                                 </div>
                               </div>
                             );
@@ -1270,10 +1333,12 @@ export default function App() {
                 </div>
 
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                  <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                    <ArrowUpRight size={20} className="text-emerald-600" />
-                    Top Revenus (Période)
-                  </h3>
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-lg font-bold flex items-center gap-2">
+                      <ArrowUpRight size={20} className="text-emerald-600" />
+                      Top Revenus (Période)
+                    </h3>
+                  </div>
                   <div className="h-80">
                     {topRevenuesChartData.length > 0 ? (
                       <ResponsiveContainer width="100%" height="100%">
@@ -1302,7 +1367,7 @@ export default function App() {
                           <Tooltip 
                             allowEscapeViewBox={{ x: true, y: true }}
                             offset={15}
-                            wrapperStyle={{ zIndex: 1000, pointerEvents: 'none' }}
+                            wrapperStyle={{ zIndex: 1000 }}
                             content={({ active, payload }) => {
                               if (!active || !payload || !payload.length) return null;
                               const data = payload[0];
@@ -1316,7 +1381,7 @@ export default function App() {
                               const fillColor = sliceIndex !== -1 ? COLORS[sliceIndex % COLORS.length] : (data.fill || data.color || '#10b981');
 
                               return (
-                                <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xl text-xs font-medium space-y-2 min-w-[240px] max-w-sm pointer-events-none select-none">
+                                <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-2xl text-xs font-medium space-y-2 min-w-[240px] max-w-[calc(100vw-32px)] sm:max-w-sm select-none">
                                   <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
                                     <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: fillColor }} />
                                     <div className="min-w-0 flex-1">
@@ -1334,18 +1399,25 @@ export default function App() {
                                     </div>
                                   </div>
 
-                                  {isOthers && item.items && item.items.length > 0 && (
+                                  {isOthers && item.items && item.items.length > 0 ? (
                                     <div className="pt-2 border-t border-slate-100">
                                       <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 mb-1.5">
                                         <span>Détail ({item.items.length} projets) :</span>
                                         <span className="text-[10px] text-slate-400 font-mono">{formatPercent(pct)} du total</span>
                                       </div>
-                                      <div className="max-h-60 overflow-y-auto space-y-1 pr-1 text-xs">
+                                      <div className="max-h-52 overflow-y-auto space-y-1 pr-1 text-xs">
                                         {item.items.map((sub: any, idx: number) => {
                                           const subPct = totalRev > 0 ? (sub.netRevenues / totalRev) * 100 : 0;
                                           return (
-                                            <div key={idx} className="flex items-center justify-between gap-3 py-1 px-1.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-                                              <span className="text-slate-700 font-medium truncate max-w-[150px]" title={sub.name}>
+                                            <div 
+                                              key={idx} 
+                                              onClick={() => {
+                                                const found = findPropertyByName(sub.name);
+                                                if (found) handleSelectProperty(found);
+                                              }}
+                                              className="flex items-center justify-between gap-3 py-1 px-1.5 rounded-lg bg-slate-50/80 hover:bg-blue-50/80 border border-slate-100 hover:border-blue-200 cursor-pointer transition-colors"
+                                            >
+                                              <span className="text-slate-700 font-medium truncate max-w-[140px]" title={sub.name}>
                                                 {sub.name}
                                               </span>
                                               <div className="text-right whitespace-nowrap flex items-center gap-1.5 flex-shrink-0">
@@ -1356,6 +1428,19 @@ export default function App() {
                                           );
                                         })}
                                       </div>
+                                    </div>
+                                  ) : (
+                                    <div className="pt-2 border-t border-slate-100">
+                                      <button 
+                                        onClick={() => {
+                                          const found = findPropertyByName(item.name);
+                                          if (found) handleSelectProperty(found);
+                                        }}
+                                        className="w-full py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg font-semibold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                                      >
+                                        <span>Voir la fiche de l'immeuble</span>
+                                        <ArrowUpRight size={13} />
+                                      </button>
                                     </div>
                                   )}
                                 </div>

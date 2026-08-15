@@ -950,19 +950,14 @@ export const calculateStats = (
   };
 };
 
-export interface PatrimoinePoint {
-  date: string;
-  formattedDate: string;
-  dateObj: Date;
-  solde: number;
-  capital: number;
-  patrimoine: number;
-}
+export type { PatrimoinePoint } from "../types";
+import { PatrimoinePoint } from "../types";
 
 export const getPatrimoineTimeline = (
   allTransactions: Transaction[],
   startDate: Date | null,
-  endDate: Date | null
+  endDate: Date | null,
+  metadata: ProjectMetadata[] = []
 ): PatrimoinePoint[] => {
   const validTransactions = allTransactions.filter(t => t.statut === "Validée");
   if (validTransactions.length === 0) return [];
@@ -979,8 +974,17 @@ export const getPatrimoineTimeline = (
 
   let runningSolde = 0;
   const propertyCapitalMap = new Map<string, number>();
+  const propertyContractTypeMap = new Map<string, boolean>(); // true if obligation
 
-  const fullHistory: { dateObj: Date; dateStr: string; solde: number; capital: number; patrimoine: number }[] = [];
+  const fullHistory: { 
+    dateObj: Date; 
+    dateStr: string; 
+    solde: number; 
+    capital: number; 
+    royaltyCapital: number;
+    obligationCapital: number;
+    patrimoine: number 
+  }[] = [];
 
   sortedAsc.forEach(t => {
     const rawVal = typeof t["montant (€)"] === "number" 
@@ -1009,16 +1013,45 @@ export const getPatrimoineTimeline = (
         }
 
         propertyCapitalMap.set(propName, propCap);
+
+        // Detect obligation vs royalty
+        if (!propertyContractTypeMap.has(propName)) {
+          const normContract = (t["type de contrat"] || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          const normalizedPropName = normalizeName(propName);
+          const propMeta = metadata?.find(m => 
+            normalizeName(m.name?.fr || "") === normalizedPropName || 
+            normalizeName(m.name?.en || "") === normalizedPropName
+          );
+          const metaContract = (propMeta?.investorContractType || propMeta?.contractType || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          const isObligation = normContract.includes("obligation") || normContract.includes("loan") || normContract.includes("pret") ||
+                               metaContract.includes("obligation") || metaContract.includes("loan") || metaContract.includes("pret") ||
+                               normalizedPropName.includes("obligation");
+          propertyContractTypeMap.set(propName, isObligation);
+        }
       }
     }
 
-    const runningCapital = Array.from(propertyCapitalMap.values()).reduce((sum, c) => sum + c, 0);
+    let runningRoyaltyCap = 0;
+    let runningObligationCap = 0;
+
+    propertyCapitalMap.forEach((cap, pName) => {
+      const isOblig = propertyContractTypeMap.get(pName) || false;
+      if (isOblig) {
+        runningObligationCap += cap;
+      } else {
+        runningRoyaltyCap += cap;
+      }
+    });
+
+    const runningCapital = runningRoyaltyCap + runningObligationCap;
 
     fullHistory.push({
       dateObj: t.parsedDate,
       dateStr: t.date,
       solde: Math.round(runningSolde * 100) / 100,
       capital: Math.round(runningCapital * 100) / 100,
+      royaltyCapital: Math.round(runningRoyaltyCap * 100) / 100,
+      obligationCapital: Math.round(runningObligationCap * 100) / 100,
       patrimoine: Math.round((runningSolde + runningCapital) * 100) / 100
     });
   });
@@ -1028,11 +1061,16 @@ export const getPatrimoineTimeline = (
 
   let baselineSolde = 0;
   let baselineCapital = 0;
+  let baselineRoyaltyCap = 0;
+  let baselineObligationCap = 0;
+
   if (rangeStart) {
     for (const p of fullHistory) {
       if (isBefore(p.dateObj, rangeStart)) {
         baselineSolde = p.solde;
         baselineCapital = p.capital;
+        baselineRoyaltyCap = p.royaltyCapital;
+        baselineObligationCap = p.obligationCapital;
       } else {
         break;
       }
@@ -1045,7 +1083,14 @@ export const getPatrimoineTimeline = (
     return true;
   });
 
-  const dateMap = new Map<string, { dateObj: Date; solde: number; capital: number; patrimoine: number }>();
+  const dateMap = new Map<string, { 
+    dateObj: Date; 
+    solde: number; 
+    capital: number; 
+    royaltyCapital: number;
+    obligationCapital: number;
+    patrimoine: number 
+  }>();
 
   if (rangeStart) {
     const startStr = format(rangeStart, "dd/MM/yyyy");
@@ -1053,6 +1098,8 @@ export const getPatrimoineTimeline = (
       dateObj: rangeStart,
       solde: baselineSolde,
       capital: baselineCapital,
+      royaltyCapital: baselineRoyaltyCap,
+      obligationCapital: baselineObligationCap,
       patrimoine: Math.round((baselineSolde + baselineCapital) * 100) / 100
     });
   }
@@ -1062,6 +1109,8 @@ export const getPatrimoineTimeline = (
       dateObj: p.dateObj,
       solde: p.solde,
       capital: p.capital,
+      royaltyCapital: p.royaltyCapital,
+      obligationCapital: p.obligationCapital,
       patrimoine: p.patrimoine
     });
   });
@@ -1072,12 +1121,16 @@ export const getPatrimoineTimeline = (
       const last = pointsInRange.length > 0 ? pointsInRange[pointsInRange.length - 1] : {
         solde: baselineSolde,
         capital: baselineCapital,
+        royaltyCapital: baselineRoyaltyCap,
+        obligationCapital: baselineObligationCap,
         patrimoine: Math.round((baselineSolde + baselineCapital) * 100) / 100
       };
       dateMap.set(endStr, {
         dateObj: rangeEnd,
         solde: last.solde,
         capital: last.capital,
+        royaltyCapital: last.royaltyCapital,
+        obligationCapital: last.obligationCapital,
         patrimoine: last.patrimoine
       });
     }
@@ -1089,6 +1142,8 @@ export const getPatrimoineTimeline = (
     dateObj: item.dateObj,
     solde: item.solde,
     capital: item.capital,
+    royaltyCapital: item.royaltyCapital,
+    obligationCapital: item.obligationCapital,
     patrimoine: item.patrimoine
   })).sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
 };

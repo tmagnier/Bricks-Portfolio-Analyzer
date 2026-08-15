@@ -255,3 +255,14 @@ export interface PropertyTimelinePoint {
   periodInvestment?: number;
   periodRepayment?: number;
 }
+
+export interface PatrimoinePoint {
+  date: string;
+  formattedDate: string;
+  dateObj: Date;
+  solde: number;
+  capital: number;
+  royaltyCapital: number;
+  obligationCapital: number;
+  patrimoine: number;
+}
