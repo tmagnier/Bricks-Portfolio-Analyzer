@@ -77,7 +77,8 @@ import {
   ShieldAlert,
   Receipt,
   Layers,
-  Briefcase
+  Briefcase,
+  Loader2
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -86,6 +87,15 @@ import { FilterTab } from './components/FilterTab';
 import { PropertyDetail, FilterMode } from './components/PropertyDetail';
 import { ProjectNotFound } from './components/ProjectNotFound';
 import { getProjectIdentifierFromUrl, findPropertyByIdOrSlug, updateProjectUrl } from './lib/router';
+import { 
+  getStoredTransactions, 
+  saveStoredTransactions, 
+  getStoredMetadata, 
+  saveStoredMetadata, 
+  getStoredFileName, 
+  saveStoredFileName, 
+  clearAllStoredData 
+} from './services/storageService';
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316'];
 
@@ -93,11 +103,16 @@ type PropertySortField = 'name' | 'firstInvestmentDate' | 'startCapital' | 'curr
 
 export default function App() {
   const [rawData, setRawData] = useState<string>('');
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [projectMetadata, setProjectMetadata] = useState<ProjectMetadata[]>([]);
-  const [loadedFileName, setLoadedFileName] = useState<string | null>(null);
+  // Restore persisted transactions and metadata so URLs / refreshed tabs keep the user session intact
+  const [transactions, setTransactions] = useState<Transaction[]>(() => getStoredTransactions() || []);
+  const [projectMetadata, setProjectMetadata] = useState<ProjectMetadata[]>(() => getStoredMetadata() || []);
+  const [loadedFileName, setLoadedFileName] = useState<string | null>(() => getStoredFileName() || null);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  
+  // Loading & Processing feedback state
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [processingMessage, setProcessingMessage] = useState<string | null>(null);
   
   // URL routing state
   const [activeProjectParam, setActiveProjectParam] = useState<string | null>(() => getProjectIdentifierFromUrl());
@@ -160,28 +175,36 @@ export default function App() {
     return { start: null, end: null };
   }, [filterMode, rollingMonths, selectedYear, selectedMonth, selectedQuarter]);
 
-  const processData = useCallback((data: any[]) => {
+  const processData = useCallback((data: any[], fileName?: string) => {
     if (Array.isArray(data)) {
       const requiredKeys = ['id', 'date', 'type', 'statut'];
       const firstItem = data[0];
       const hasKeys = firstItem && requiredKeys.every(k => k in firstItem);
       
       if (hasKeys) {
-        const normalized = data.map(item => ({
+        const normalized: Transaction[] = data.map(item => ({
           ...item,
           "montant (€)": String(item["montant (€)"] || "0"),
           "prix de la brick (€)": String(item["prix de la brick (€)"] || ""),
           date: String(item.date)
         }));
         setTransactions(normalized);
+        saveStoredTransactions(normalized);
+        if (fileName) {
+          setLoadedFileName(fileName);
+          saveStoredFileName(fileName);
+        }
         setError(null);
         const years = getAvailableYears(normalized);
         if (years.length > 0) setSelectedYear(years[0]);
+        return true;
       } else {
         setError("Le fichier ne semble pas contenir les colonnes attendues (id, date, type, statut...).");
+        return false;
       }
     } else {
       setError("Le format des données est invalide.");
+      return false;
     }
   }, []);
 
@@ -195,14 +218,17 @@ export default function App() {
           flattened = data;
         }
         setProjectMetadata(flattened);
+        saveStoredMetadata(flattened);
         setError(null);
+        return true;
       }
     } catch (e) {
       setError("Erreur lors de l'importation de la configuration.");
     }
+    return false;
   }, []);
 
-  // Auto load data.json by default if it exists in root
+  // Auto load data.json by default if it exists in root and metadata is not already set
   useEffect(() => {
     fetch(`${import.meta.env.BASE_URL}data.json`)
       .then(res => {
@@ -214,18 +240,23 @@ export default function App() {
           if (Array.isArray(data)) {
             const requiredKeys = ['id', 'date', 'type', 'statut'];
             if (data[0] && requiredKeys.every(k => k in data[0])) {
-              processData(data);
+              // Transactions in data.json
+              if (transactions.length === 0) {
+                processData(data, "data.json");
+              }
             } else {
-              processMetadata(data);
+              // Metadata in data.json
+              if (projectMetadata.length === 0) {
+                processMetadata(data);
+              }
             }
-            setLoadedFileName("data.json");
           }
         }
       })
       .catch(() => {
         // silent fallback if data.json is not present
       });
-  }, [processData, processMetadata]);
+  }, [processData, processMetadata, transactions.length, projectMetadata.length]);
 
   // Listen to browser Back / Forward events and update active project state
   useEffect(() => {
@@ -243,40 +274,73 @@ export default function App() {
   }, []);
 
   const handleParseText = () => {
-    try {
-      const parsed = JSON.parse(rawData);
-      processData(parsed);
-    } catch (e) {
-      setError("Erreur de parsing JSON. Vérifiez le format du texte collé.");
-    }
+    if (!rawData.trim()) return;
+    setIsProcessing(true);
+    setProcessingMessage("Analyse du texte JSON et calcul des statistiques...");
+    setError(null);
+
+    setTimeout(() => {
+      try {
+        const parsed = JSON.parse(rawData);
+        processData(parsed, "JSON collé");
+      } catch (e) {
+        setError("Erreur de parsing JSON. Vérifiez le format du texte collé.");
+      } finally {
+        setIsProcessing(false);
+        setProcessingMessage(null);
+      }
+    }, 50);
   };
 
   const handleFileUpload = (file: File, type: 'transactions' | 'metadata' = 'transactions') => {
+    setIsProcessing(true);
+    setProcessingMessage(
+      type === 'transactions' 
+        ? `Lecture du fichier ${file.name}...` 
+        : `Chargement de la configuration ${file.name}...`
+    );
+    setError(null);
+
     const reader = new FileReader();
     const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
     const isJson = file.name.endsWith('.json');
 
     reader.onload = (e) => {
-      try {
-        const data = e.target?.result;
-        if (isExcel && type === 'transactions') {
-          const workbook = XLSX.read(data, { type: 'binary' });
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const json = XLSX.utils.sheet_to_json(worksheet);
-          processData(json);
-          setLoadedFileName(file.name);
-        } else if (isJson) {
-          const json = JSON.parse(data as string);
-          if (type === 'transactions') processData(json);
-          else processMetadata(json);
-          setLoadedFileName(file.name);
-        } else {
-          setError("Format de fichier non supporté.");
+      setProcessingMessage("Traitement des transactions et calcul des statistiques...");
+      // Defer computationally heavy parsing so React paints the loading state smoothly
+      setTimeout(() => {
+        try {
+          const data = e.target?.result;
+          if (isExcel && type === 'transactions') {
+            const workbook = XLSX.read(data, { type: 'binary' });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            const json = XLSX.utils.sheet_to_json(worksheet);
+            processData(json, file.name);
+          } else if (isJson) {
+            const json = JSON.parse(data as string);
+            if (type === 'transactions') {
+              processData(json, file.name);
+            } else {
+              processMetadata(json);
+              setLoadedFileName(prev => prev || file.name);
+            }
+          } else {
+            setError("Format de fichier non supporté.");
+          }
+        } catch (err) {
+          setError("Erreur lors de la lecture ou de l'analyse du fichier.");
+        } finally {
+          setIsProcessing(false);
+          setProcessingMessage(null);
         }
-      } catch (err) {
-        setError("Erreur lors de la lecture du fichier.");
-      }
+      }, 60);
+    };
+
+    reader.onerror = () => {
+      setError("Impossible de lire le fichier.");
+      setIsProcessing(false);
+      setProcessingMessage(null);
     };
 
     if (isExcel) {
@@ -307,6 +371,9 @@ export default function App() {
     if (properties.length > 0) {
       const found = findPropertyByIdOrSlug(activeProjectParam, properties);
       setSelectedProperty(found || null);
+      if (found) {
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      }
     }
   }, [activeProjectParam, properties]);
 
@@ -315,12 +382,14 @@ export default function App() {
     setSelectedProperty(property);
     setActiveProjectParam(property.name);
     updateProjectUrl(property.name);
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
   }, []);
 
   const handleBackToDashboard = useCallback(() => {
     setSelectedProperty(null);
     setActiveProjectParam(null);
     updateProjectUrl(null);
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
   }, []);
 
   const patrimoineTimeline = useMemo(() => 
@@ -581,7 +650,43 @@ export default function App() {
   // If no transactions loaded yet
   if (transactions.length === 0) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 relative">
+        {/* Loading Overlay */}
+        {isProcessing && (
+          <div 
+            id="loading-overlay-upload"
+            className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-slate-100 text-center flex flex-col items-center"
+            >
+              <div className="relative mb-6">
+                <div className="w-16 h-16 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shadow-inner">
+                  <Loader2 size={32} className="animate-spin text-blue-600" />
+                </div>
+                <div className="absolute -inset-1 rounded-3xl bg-blue-500/20 blur-md -z-10 animate-pulse" />
+              </div>
+
+              <h3 className="text-xl font-bold text-slate-900 mb-2">Chargement en cours...</h3>
+              <p className="text-sm text-slate-500 mb-6 font-medium">
+                {processingMessage || "Analyse de vos transactions Bricks et calcul des statistiques..."}
+              </p>
+
+              <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden relative">
+                <motion.div 
+                  className="h-full bg-linear-to-r from-blue-500 to-indigo-600 rounded-full w-1/2"
+                  animate={{ x: ['-100%', '200%'] }}
+                  transition={{ repeat: Infinity, duration: 1.2, ease: "easeInOut" }}
+                />
+              </div>
+              
+              <span className="text-xs text-slate-400 mt-4 font-medium">Veuillez patienter quelques instants</span>
+            </motion.div>
+          </div>
+        )}
+
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -630,7 +735,8 @@ export default function App() {
               onDrop={onDrop}
               className={cn(
                 "relative border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center transition-all cursor-pointer group",
-                isDragging ? "border-blue-500 bg-blue-50" : "border-slate-200 hover:border-blue-400 hover:bg-slate-50"
+                isDragging ? "border-blue-500 bg-blue-50" : "border-slate-200 hover:border-blue-400 hover:bg-slate-50",
+                isProcessing && "pointer-events-none opacity-60"
               )}
               onClick={() => document.getElementById('fileInput')?.click()}
             >
@@ -642,10 +748,14 @@ export default function App() {
                 onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
               />
               <div className="p-4 bg-blue-50 text-blue-600 rounded-full mb-4 group-hover:scale-110 transition-transform">
-                <Upload size={32} />
+                {isProcessing ? <Loader2 size={32} className="animate-spin text-blue-600" /> : <Upload size={32} />}
               </div>
-              <h3 className="font-bold text-slate-900 mb-2">Déposez vos transactions</h3>
-              <p className="text-sm text-slate-500 mb-4">Supporte les formats .json et .xlsx</p>
+              <h3 className="font-bold text-slate-900 mb-2">
+                {isProcessing ? "Traitement en cours..." : "Déposez vos transactions"}
+              </h3>
+              <p className="text-sm text-slate-500 mb-4">
+                {isProcessing ? "Veuillez patienter pendant l'analyse..." : "Supporte les formats .json et .xlsx"}
+              </p>
               <div className="flex gap-2">
                 <span className="px-2 py-1 bg-white border border-slate-200 rounded text-[10px] font-bold text-slate-400 flex items-center gap-1">
                   <FileJson size={12} /> JSON
@@ -671,10 +781,17 @@ export default function App() {
               <button
                 id="btn-parse-text"
                 onClick={handleParseText}
-                disabled={!rawData}
+                disabled={!rawData || isProcessing}
                 className="w-full py-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
               >
-                Analyser le texte
+                {isProcessing ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    <span>Traitement...</span>
+                  </>
+                ) : (
+                  <span>Analyser le texte</span>
+                )}
               </button>
             </div>
           </div>
@@ -699,7 +816,43 @@ export default function App() {
   const isInvalidProjectUrl = activeProjectParam !== null && selectedProperty === null;
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-900">
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-900 relative">
+      {/* Global Loading Overlay */}
+      {isProcessing && (
+        <div 
+          id="loading-overlay-global"
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl border border-slate-100 text-center flex flex-col items-center"
+          >
+            <div className="relative mb-6">
+              <div className="w-16 h-16 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shadow-inner">
+                <Loader2 size={32} className="animate-spin text-blue-600" />
+              </div>
+              <div className="absolute -inset-1 rounded-3xl bg-blue-500/20 blur-md -z-10 animate-pulse" />
+            </div>
+
+            <h3 className="text-xl font-bold text-slate-900 mb-2">Chargement en cours...</h3>
+            <p className="text-sm text-slate-500 mb-6 font-medium">
+              {processingMessage || "Analyse de vos transactions Bricks et calcul des statistiques..."}
+            </p>
+
+            <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden relative">
+              <motion.div 
+                className="h-full bg-linear-to-r from-blue-500 to-indigo-600 rounded-full w-1/2"
+                animate={{ x: ['-100%', '200%'] }}
+                transition={{ repeat: Infinity, duration: 1.2, ease: "easeInOut" }}
+              />
+            </div>
+            
+            <span className="text-xs text-slate-400 mt-4 font-medium">Veuillez patienter quelques instants</span>
+          </motion.div>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto">
         <AnimatePresence mode="wait">
           {isInvalidProjectUrl ? (
@@ -785,6 +938,7 @@ export default function App() {
                       <button 
                         id="btn-close-session"
                         onClick={() => { 
+                          clearAllStoredData();
                           setTransactions([]); 
                           setProjectMetadata([]); 
                           setLoadedFileName(null); 
@@ -793,7 +947,7 @@ export default function App() {
                           updateProjectUrl(null);
                         }}
                         className="px-3 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50 transition-colors flex items-center gap-1.5 font-medium group cursor-pointer"
-                        title="Fermer la session"
+                        title="Fermer la session et effacer les données sauvegardées"
                       >
                         <LogOut size={13} className="text-slate-400 group-hover:text-red-500 transition-colors" />
                         <span>Fermer session</span>

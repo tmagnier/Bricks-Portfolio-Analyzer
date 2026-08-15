@@ -190,6 +190,11 @@ export function PropertyDetail({
   const [detailTxSearch, setDetailTxSearch] = useState('');
   const [propertyRevenueMode, setPropertyRevenueMode] = useState<'cumulative' | 'monthly' | 'both'>('cumulative');
 
+  // Automatically scroll to the top of the page when opening or switching property detail
+  React.useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  }, [property.name]);
+
   const propertyTimeline = useMemo(() => {
     return getPropertyTimeline(sortedTxs);
   }, [sortedTxs]);
@@ -218,8 +223,10 @@ export function PropertyDetail({
   }, [sortedTxs, detailTxCategory, detailTxSearch]);
 
   const meta = property.metadata;
-  const contractType = meta?.investorContractType || sortedTxs.find(t => t["type de contrat"])?.["type de contrat"];
-  const isObligation = contractType ? contractType.toLowerCase().includes("obligation") : false;
+  const contractType = meta?.investorContractType || sortedTxs.find(t => t["type de contrat"])?.["type de contrat"] || property.contractType;
+  const isObligation = contractType 
+    ? (contractType.toLowerCase().includes("obligation") || contractType.toLowerCase().includes("pret") || contractType.toLowerCase().includes("loan")) 
+    : (property.isObligation ?? false);
   const isRoyalty = !isObligation;
 
   const totalSalesEver = useMemo(() => {
@@ -622,24 +629,26 @@ export function PropertyDetail({
           icon={<Building2 className="text-emerald-600" />}
           description="Achats cumulés"
         />
-        <StatCard 
-          id="stat-card-cost-price"
-          title="Prix de Revient (PRU)" 
-          value={formatEuro(property.costForOwnedBricks > 0 ? property.costForOwnedBricks : (property.totalPurchaseCost || property.totalInvested))} 
-          icon={<Coins className="text-amber-600" />}
-          badge={
-            property.ownedBricks > 0
-              ? `${formatEuro(property.averageBuyBrickPrice)} / brique`
-              : property.historicalAverageBuyBrickPrice
-              ? `${formatEuro(property.historicalAverageBuyBrickPrice)} / brique`
-              : undefined
-          }
-          description={
-            property.ownedBricks > 0
-              ? `PRU moyen de ${property.ownedBricks} brique${property.ownedBricks > 1 ? 's' : ''}`
-              : `Coût d'achat total (${property.totalBoughtBricks || '-'} briques)`
-          }
-        />
+        {isRoyalty && (
+          <StatCard 
+            id="stat-card-cost-price"
+            title="Prix de Revient (PRU)" 
+            value={formatEuro(property.costForOwnedBricks > 0 ? property.costForOwnedBricks : (property.totalPurchaseCost || property.totalInvested))} 
+            icon={<Coins className="text-amber-600" />}
+            badge={
+              property.ownedBricks > 0
+                ? `${formatEuro(property.averageBuyBrickPrice)} / brique`
+                : property.historicalAverageBuyBrickPrice
+                ? `${formatEuro(property.historicalAverageBuyBrickPrice)} / brique`
+                : undefined
+            }
+            description={
+              property.ownedBricks > 0
+                ? `PRU moyen de ${property.ownedBricks} brique${property.ownedBricks > 1 ? 's' : ''}`
+                : `Coût d'achat total (${property.totalBoughtBricks || '-'} briques)`
+            }
+          />
+        )}
         <StatCard 
           id="stat-card-net-revenues"
           title="Revenus Nets" 
@@ -905,19 +914,23 @@ export function PropertyDetail({
               </span>
             } />
             <DetailItem label="Prix brique actuel" value={formatEuro(property.currentBrickPrice)} />
-            <DetailItem 
-              label="Prix de revient (PRU)" 
-              value={`${formatEuro(property.ownedBricks > 0 ? property.averageBuyBrickPrice : (property.historicalAverageBuyBrickPrice || 10))} / br.`} 
-            />
-            <DetailItem 
-              label="Coût de revient total" 
-              value={formatEuro(property.costForOwnedBricks > 0 ? property.costForOwnedBricks : (property.totalPurchaseCost || property.totalInvested))} 
-            />
-            {property.ownedBricks > 0 && property.netRevenues > 0 && (
-              <DetailItem 
-                label="Prix de revient net (après loyers)" 
-                value={`${formatEuro(property.netCostForOwnedBricks !== undefined ? property.netCostForOwnedBricks : Math.max(0, property.costForOwnedBricks - property.netRevenues))} (${formatEuro(property.netBrickPrice || ((property.costForOwnedBricks - property.netRevenues) / property.ownedBricks))} / br.)`} 
-              />
+            {isRoyalty && (
+              <>
+                <DetailItem 
+                  label="Prix de revient (PRU)" 
+                  value={`${formatEuro(property.ownedBricks > 0 ? property.averageBuyBrickPrice : (property.historicalAverageBuyBrickPrice || 10))} / br.`} 
+                />
+                <DetailItem 
+                  label="Coût de revient total" 
+                  value={formatEuro(property.costForOwnedBricks > 0 ? property.costForOwnedBricks : (property.totalPurchaseCost || property.totalInvested))} 
+                />
+                {property.ownedBricks > 0 && property.netRevenues > 0 && (
+                  <DetailItem 
+                    label="Prix de revient net (après loyers)" 
+                    value={`${formatEuro(property.netCostForOwnedBricks !== undefined ? property.netCostForOwnedBricks : Math.max(0, property.costForOwnedBricks - property.netRevenues))} (${formatEuro(property.netBrickPrice || ((property.costForOwnedBricks - property.netRevenues) / property.ownedBricks))} / br.)`} 
+                  />
+                )}
+              </>
             )}
             {isRoyalty && (
               <DetailItem label="Plus/Moins-value latente" value={`${property.latentCapitalGain >= 0 ? '+' : ''}${formatEuro(property.latentCapitalGain)}`} />
