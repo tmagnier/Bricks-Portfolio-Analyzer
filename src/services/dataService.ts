@@ -149,10 +149,12 @@ export const calculateStats = (
     const firstInvestmentDate = firstTx ? firstTx.date : undefined;
     const firstInvestmentDateObj = firstTx ? parseDate(firstTx.date) : null;
 
-    // Find earliest revenue transaction for this property
+    // Find earliest and latest revenue transactions for this property
     const revenueTxs = sortedTxsAsc.filter(t => isRevenueType(t.type));
     let firstRevenueDate: string | undefined = undefined;
+    let lastRevenueDate: string | undefined = undefined;
     let daysBeforeFirstRevenue: number | undefined = undefined;
+    let daysSinceLastRevenue: number | undefined = undefined;
     if (revenueTxs.length > 0) {
       const firstRevTx = revenueTxs[0];
       firstRevenueDate = firstRevTx.date;
@@ -160,7 +162,30 @@ export const calculateStats = (
       if (firstInvestmentDateObj && !isNaN(firstInvestmentDateObj.getTime()) && !isNaN(firstRevDateObj.getTime())) {
         daysBeforeFirstRevenue = Math.max(0, differenceInDays(firstRevDateObj, firstInvestmentDateObj));
       }
+
+      const lastRevTx = revenueTxs[revenueTxs.length - 1];
+      lastRevenueDate = lastRevTx.date;
+      const lastRevDateObj = parseDate(lastRevTx.date);
+      if (!isNaN(lastRevDateObj.getTime())) {
+        daysSinceLastRevenue = Math.max(0, differenceInDays(now, lastRevDateObj));
+      }
+    } else if (firstInvestmentDateObj && !isNaN(firstInvestmentDateObj.getTime())) {
+      daysSinceLastRevenue = Math.max(0, differenceInDays(now, firstInvestmentDateObj));
     }
+
+    // Marketplace fees for this property
+    let marketplaceFees = 0;
+    sortedTxsAsc.forEach(t => {
+      const normType = normalizeTransactionType(t.type);
+      const rawType = (t.type || "").toLowerCase();
+      if (normType === TransactionType.FRAIS_ACHAT_MARKETPLACE || isFeeType(t.type) || rawType.includes("frais")) {
+        const rawVal = parseFloat((t["montant (€)"] || "0").replace(",", "."));
+        if (!isNaN(rawVal)) {
+          marketplaceFees += Math.abs(rawVal);
+        }
+      }
+    });
+    marketplaceFees = Math.round(marketplaceFees * 100) / 100;
 
     let totalResaleOccurredBeforeEnd = false;
     let runningCapital = 0;
@@ -421,18 +446,17 @@ export const calculateStats = (
             }
           }
         }
-      } else if (sortedTxsAsc.length > 0) {
-        const lastTxDateObj = parseDate(sortedTxsAsc[sortedTxsAsc.length - 1].date);
-        fullEnd = isBefore(lastTxDateObj, now) ? lastTxDateObj : now;
+      } else {
+        fullEnd = now;
       }
 
       const days = Math.max(1, differenceInDays(periodEnd, periodStart));
       const yearsElapsed = Math.max(days / 365.25, 1 / 12); // minimum 1 month
       annualYield = yieldVal / yearsElapsed;
 
-      // Always calculate the total loan/investment duration from first purchase date to final capital 0 date (or last active date)
+      // Always calculate the total loan/investment duration from first purchase date to final capital 0 date (or today for active projects)
       const fullStart = firstInvestmentDateObj;
-      if (isAfter(fullEnd, fullStart)) {
+      if (isProjectFinished && isAfter(fullEnd, fullStart)) {
         investmentDurationText = formatInvestmentDuration(fullStart, fullEnd);
       } else {
         investmentDurationText = formatInvestmentDuration(fullStart, now);
@@ -537,7 +561,11 @@ export const calculateStats = (
       annualYield,
       firstInvestmentDate,
       firstRevenueDate,
+      lastRevenueDate,
       daysBeforeFirstRevenue,
+      daysSinceLastRevenue,
+      isPaymentDelayed: !isProjectFinished && daysSinceLastRevenue !== undefined && daysSinceLastRevenue > 31,
+      marketplaceFees,
       capitalZeroDate,
       finalRepaymentDate,
       repaymentTimingStatus,

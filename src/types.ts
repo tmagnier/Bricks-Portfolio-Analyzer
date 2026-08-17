@@ -104,7 +104,11 @@ export interface PropertyStats {
   annualYield: number; // Rendement par an / annuel
   firstInvestmentDate?: string; // Date du premier achat de l'investisseur (dd/MM/yyyy)
   firstRevenueDate?: string; // Date du premier versement de revenu (dd/MM/yyyy)
+  lastRevenueDate?: string; // Date du dernier versement de revenu (dd/MM/yyyy)
   daysBeforeFirstRevenue?: number; // Nombre de jours entre le 1er investissement et le 1er revenu
+  daysSinceLastRevenue?: number; // Nombre de jours depuis le dernier revenu
+  isPaymentDelayed?: boolean; // Vrai si projet en cours et sans revenu depuis plus d'un mois
+  marketplaceFees?: number; // Total des frais marketplace pour ce projet (€)
   capitalZeroDate?: string; // Date à laquelle le capital est passé à 0 (dd/MM/yyyy)
   finalRepaymentDate?: string; // Date du remboursement final ou de revente (dd/MM/yyyy)
   repaymentTimingStatus?: 'anticipation' | 'retard' | 'on_time'; // Statut par rapport à la durée initiale

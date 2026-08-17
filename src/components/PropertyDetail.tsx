@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { parse } from 'date-fns';
+import { parse, differenceInDays } from 'date-fns';
 import { 
   ResponsiveContainer, 
   ComposedChart, 
@@ -30,7 +30,9 @@ import {
   Search, 
   X, 
   FileText, 
-  Percent 
+  Percent,
+  Receipt,
+  AlertTriangle 
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { 
@@ -42,7 +44,7 @@ import {
   isFeeType, 
   isTaxType 
 } from '../types';
-import { getPropertyTimeline } from '../services/dataService';
+import { getPropertyTimeline, formatInvestmentDuration } from '../services/dataService';
 import { cn } from '../lib/utils';
 import { StatCard } from './StatCard';
 import { FilterTab } from './FilterTab';
@@ -268,6 +270,83 @@ export function PropertyDetail({
   };
 
   const isRefundedOrSold = property.ownedBricks === 0 || property.currentCapital === 0;
+
+  const totalMarketplaceFees = useMemo(() => {
+    if (property.marketplaceFees !== undefined && property.marketplaceFees > 0) {
+      return property.marketplaceFees;
+    }
+    return sortedTxs
+      .filter(t => isFeeType(t.type) || (t.type || '').toLowerCase().includes('frais'))
+      .reduce((sum, t) => sum + Math.abs(parseFloat((t["montant (€)"] || "0").replace(",", "."))), 0);
+  }, [property.marketplaceFees, sortedTxs]);
+
+  const latestRevenueInfo = useMemo(() => {
+    if (isRefundedOrSold) return null;
+    const now = new Date();
+    const revTxs = sortedTxs.filter(t => isRevenueType(t.type));
+
+    if (revTxs.length > 0) {
+      // sortedTxs is sorted descending by date, so revTxs[0] is the most recent
+      const lastRevTx = revTxs[0];
+      try {
+        const d = parse(lastRevTx.date, "dd/MM/yyyy", new Date());
+        if (!isNaN(d.getTime())) {
+          const days = Math.max(0, differenceInDays(now, d));
+          if (days > 31) {
+            return {
+              hasDelay: true,
+              daysSince: days,
+              durationText: formatInvestmentDuration(d, now),
+              lastDate: lastRevTx.date,
+              hasNeverReceived: false
+            };
+          }
+        }
+      } catch (e) {}
+    } else if (property.firstInvestmentDate) {
+      try {
+        const d = parse(property.firstInvestmentDate, "dd/MM/yyyy", new Date());
+        if (!isNaN(d.getTime())) {
+          const days = Math.max(0, differenceInDays(now, d));
+          if (days > 31) {
+            return {
+              hasDelay: true,
+              daysSince: days,
+              durationText: formatInvestmentDuration(d, now),
+              lastDate: null,
+              hasNeverReceived: true
+            };
+          }
+        }
+      } catch (e) {}
+    }
+    return null;
+  }, [isRefundedOrSold, sortedTxs, property.firstInvestmentDate]);
+
+  const ongoingDurationText = useMemo(() => {
+    if (property.investmentDurationText) return property.investmentDurationText;
+    if (property.firstInvestmentDate) {
+      try {
+        const d = parse(property.firstInvestmentDate, "dd/MM/yyyy", new Date());
+        if (!isNaN(d.getTime())) {
+          return formatInvestmentDuration(d, new Date());
+        }
+      } catch (e) {
+        // fallback
+      }
+    }
+    if (property.projectOpeningDate) {
+      try {
+        const d = parse(property.projectOpeningDate, "dd/MM/yyyy", new Date());
+        if (!isNaN(d.getTime())) {
+          return formatInvestmentDuration(d, new Date());
+        }
+      } catch (e) {
+        // fallback
+      }
+    }
+    return null;
+  }, [property.investmentDurationText, property.firstInvestmentDate, property.projectOpeningDate]);
 
   return (
     <motion.div
@@ -569,22 +648,18 @@ export function PropertyDetail({
           icon={<Clock className="text-slate-600" />}
           description="Début de période"
         />
-        {isRefundedOrSold && isRoyalty && (
-          <StatCard 
-            id="stat-card-gain-loss"
-            title="Plus / Moins-value" 
-            value={`${plusMoinsValue >= 0 ? '+' : ''}${formatEuro(plusMoinsValue)}`} 
-            icon={<Coins className={plusMoinsValue >= 0 ? "text-emerald-600" : "text-rose-600"} />}
-            description={`Ventes (${formatEuro(salesForGain)}) - Inves. (${formatEuro(property.totalInvested)})`}
-            trend={plusMoinsValue >= 0 ? "positive" : "negative"}
-            badge="Revente / Remboursé"
-          />
-        )}
+        <StatCard 
+          id="stat-card-current-capital"
+          title="Capital (Fin)" 
+          value={formatEuro(property.currentCapital)} 
+          icon={<Wallet className="text-blue-600" />}
+          description={isRefundedOrSold ? "Capital soldé / Remboursé" : "Encours fin de période"}
+        />
         {isRefundedOrSold ? (
           <StatCard 
             id="stat-card-loan-duration"
             title="Durée du prêt" 
-            value={property.investmentDurationText || '-'} 
+            value={property.investmentDurationText || ongoingDurationText || '-'} 
             icon={<Clock className="text-indigo-600" />}
             description={
               property.repaymentTimingStatus === 'anticipation'
@@ -605,11 +680,51 @@ export function PropertyDetail({
           />
         ) : (
           <StatCard 
-            id="stat-card-current-capital"
-            title="Capital (Fin)" 
-            value={formatEuro(property.currentCapital)} 
-            icon={<Wallet className="text-blue-600" />}
-            description="Fin de période"
+            id="stat-card-loan-duration"
+            title="Durée du prêt" 
+            value={ongoingDurationText || property.investmentDurationText || '-'} 
+            icon={<Clock className="text-indigo-600" />}
+            badge="Toujours en cours"
+            description={
+              property.firstInvestmentDate
+                ? (property.expectedEndDate
+                    ? `Depuis le ${property.firstInvestmentDate} • Fin prévue : ${property.expectedEndDate}`
+                    : (meta?.investmentHorizonInMonths
+                        ? `Depuis le ${property.firstInvestmentDate} • Horizon : ${meta.investmentHorizonInMonths} mois`
+                        : `Depuis le 1er achat (${property.firstInvestmentDate})`
+                      )
+                  )
+                : (property.projectOpeningDate
+                    ? `Depuis le ${property.projectOpeningDate}`
+                    : "Projet toujours en cours"
+                  )
+            }
+          />
+        )}
+        {isRefundedOrSold && isRoyalty && (
+          <StatCard 
+            id="stat-card-gain-loss"
+            title="Plus / Moins-value" 
+            value={`${plusMoinsValue >= 0 ? '+' : ''}${formatEuro(plusMoinsValue)}`} 
+            icon={<Coins className={plusMoinsValue >= 0 ? "text-emerald-600" : "text-rose-600"} />}
+            description={`Ventes (${formatEuro(salesForGain)}) - Inves. (${formatEuro(property.totalInvested)})`}
+            trend={plusMoinsValue >= 0 ? "positive" : "negative"}
+            badge="Revente / Remboursé"
+          />
+        )}
+        {latestRevenueInfo?.hasDelay && (
+          <StatCard 
+            id="stat-card-payment-delay"
+            title="Depuis dernier Revenu" 
+            value={latestRevenueInfo.durationText} 
+            icon={<AlertTriangle className="text-amber-600" />}
+            badge="Retard de paiement"
+            description={
+              latestRevenueInfo.lastDate
+                ? `Dernier versement le ${latestRevenueInfo.lastDate} (${latestRevenueInfo.daysSince} j)`
+                : `Aucun versement depuis l'achat (${property.firstInvestmentDate})`
+            }
+            trend="negative"
           />
         )}
         {isRoyalty && (
@@ -647,6 +762,16 @@ export function PropertyDetail({
                 ? `PRU moyen de ${property.ownedBricks} brique${property.ownedBricks > 1 ? 's' : ''}`
                 : `Coût d'achat total (${property.totalBoughtBricks || '-'} briques)`
             }
+          />
+        )}
+        {isRoyalty && totalMarketplaceFees > 0 && (
+          <StatCard 
+            id="stat-card-marketplace-fees"
+            title="Frais Marketplace" 
+            value={formatEuro(totalMarketplaceFees)} 
+            icon={<Receipt className="text-rose-600" />}
+            description="Frais de transaction prélevés"
+            badge="Marketplace"
           />
         )}
         <StatCard 
@@ -967,11 +1092,36 @@ export function PropertyDetail({
             {isRefundedOrSold && property.investmentDurationText && (
               <DetailItem label="Durée réelle du prêt" value={property.investmentDurationText} />
             )}
+            {!isRefundedOrSold && (property.investmentDurationText || ongoingDurationText) && (
+              <DetailItem 
+                label="Durée du prêt (en cours)" 
+                value={`${property.investmentDurationText || ongoingDurationText} (toujours en cours)`} 
+              />
+            )}
+            {!isRefundedOrSold && property.expectedEndDate && (
+              <DetailItem label="Fin de prêt estimée" value={property.expectedEndDate} />
+            )}
             {meta?.investmentHorizonInMonths && (
               <DetailItem label="Horizon initial prévu" value={`${meta.investmentHorizonInMonths} mois`} />
             )}
             <DetailItem label="Rendement Total" value={formatPercent(property.yield)} />
             <DetailItem label="Rendement Annuel" value={`${formatPercent(property.annualYield)} / an`} />
+            {isRoyalty && totalMarketplaceFees > 0 && (
+              <DetailItem label="Frais Marketplace" value={formatEuro(totalMarketplaceFees)} />
+            )}
+            {latestRevenueInfo?.hasDelay && (
+              <DetailItem 
+                label="Statut des versements" 
+                value={
+                  <span className="text-amber-600 font-semibold">
+                    {latestRevenueInfo.durationText} ({latestRevenueInfo.daysSince} j) sans versement {latestRevenueInfo.lastDate ? `(dernier le ${latestRevenueInfo.lastDate})` : "(aucun versement)"} - Retard
+                  </span>
+                } 
+              />
+            )}
+            {!isRefundedOrSold && !latestRevenueInfo?.hasDelay && property.lastRevenueDate && (
+              <DetailItem label="Dernier versement perçu" value={`Le ${property.lastRevenueDate}`} />
+            )}
             {property.commercialAdjustments !== undefined && property.commercialAdjustments > 0 && (
               <DetailItem label="Ajustement commercial" value={`+${formatEuro(property.commercialAdjustments)}`} />
             )}
