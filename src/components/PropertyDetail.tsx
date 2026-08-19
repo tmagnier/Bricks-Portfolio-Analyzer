@@ -5,6 +5,9 @@ import {
   ComposedChart, 
   Line, 
   Bar, 
+  BarChart,
+  ReferenceLine,
+  Cell,
   XAxis, 
   YAxis, 
   CartesianGrid, 
@@ -32,12 +35,16 @@ import {
   FileText, 
   Percent,
   Receipt,
-  AlertTriangle 
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { 
   PropertyStats, 
   PropertyTimelinePoint, 
+  YearlyYieldPoint,
+  MonthlyYieldPoint,
   isPurchaseType, 
   isRevenueType, 
   isRepaymentOrSaleType, 
@@ -191,6 +198,7 @@ export function PropertyDetail({
   const [detailTxCategory, setDetailTxCategory] = useState<'all' | 'purchases' | 'revenues' | 'sales'>('all');
   const [detailTxSearch, setDetailTxSearch] = useState('');
   const [propertyRevenueMode, setPropertyRevenueMode] = useState<'cumulative' | 'monthly' | 'both'>('cumulative');
+  const [showMonthlyYieldBreakdown, setShowMonthlyYieldBreakdown] = useState(false);
 
   // Automatically scroll to the top of the page when opening or switching property detail
   React.useEffect(() => {
@@ -1020,6 +1028,272 @@ export function PropertyDetail({
           <div className="h-60 flex flex-col items-center justify-center text-center p-6 bg-slate-50/70 rounded-xl border border-dashed border-slate-200">
             <Coins size={28} className="text-slate-400 mb-2" />
             <p className="text-sm font-semibold text-slate-600">Aucune donnée temporelle disponible pour ce projet</p>
+          </div>
+        )}
+      </div>
+
+      {/* Section: Rendement par Année Écoulée & Performance Temporelle */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Percent size={20} className="text-purple-600" />
+              Rendement par Année Écoulée & Rentabilité Mensuelle
+            </h3>
+            <p className="text-xs text-slate-500 font-medium mt-0.5">
+              Calcul précis prenant en compte les variations mensuelles de capital (achats/ventes de briques, frais marketplace inclus) et les mois sans revenus (0%).
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              id="btn-toggle-monthly-yield-breakdown"
+              type="button"
+              onClick={() => setShowMonthlyYieldBreakdown(!showMonthlyYieldBreakdown)}
+              className={cn(
+                "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer",
+                showMonthlyYieldBreakdown
+                  ? "bg-purple-50 text-purple-700 border-purple-200"
+                  : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
+              )}
+            >
+              <History size={14} className="text-purple-600" />
+              <span>{showMonthlyYieldBreakdown ? "Masquer le détail mensuel" : "Voir détail mois par mois"}</span>
+              {showMonthlyYieldBreakdown ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          </div>
+        </div>
+
+        {/* 4 KPI summary cards */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div className="bg-purple-50/60 border border-purple-100 rounded-xl p-4">
+            <span className="text-xs font-semibold text-purple-700 block mb-1">Rendement Global Total</span>
+            <div className="text-xl font-bold font-mono text-purple-900">
+              {formatPercent(property.timeWeightedTotalYield ?? property.yield)}
+            </div>
+            <span className="text-[11px] text-purple-600 font-medium">Sur toute la durée</span>
+          </div>
+
+          <div className="bg-indigo-50/60 border border-indigo-100 rounded-xl p-4">
+            <span className="text-xs font-semibold text-indigo-700 block mb-1">Rendement Moyen / An</span>
+            <div className="text-xl font-bold font-mono text-indigo-900">
+              {formatPercent(property.timeWeightedAnnualYield ?? property.annualYield)}
+            </div>
+            <span className="text-[11px] text-indigo-600 font-medium">Moyenne annualisée</span>
+          </div>
+
+          <div className="bg-blue-50/60 border border-blue-100 rounded-xl p-4">
+            <span className="text-xs font-semibold text-blue-700 block mb-1">Durée Prêt / Inves.</span>
+            <div className="text-xl font-bold text-blue-900">
+              {property.investmentDurationText || '1 an'}
+            </div>
+            <span className="text-[11px] text-blue-600 font-medium">
+              {property.monthlyYieldHistory ? `${property.monthlyYieldHistory.length} mois analysés` : 'Période analysée'}
+            </span>
+          </div>
+
+          <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-4">
+            <span className="text-xs font-semibold text-emerald-700 block mb-1">Revenus Nets Perçus</span>
+            <div className="text-xl font-bold font-mono text-emerald-900">
+              {formatEuro(property.netRevenues)}
+            </div>
+            <span className="text-[11px] text-emerald-600 font-medium">Total loyers & intérêts</span>
+          </div>
+        </div>
+
+        {/* Annual Yield Bar Chart */}
+        {property.yearlyYieldHistory && property.yearlyYieldHistory.length > 0 ? (
+          <div className="space-y-6">
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart 
+                  data={property.yearlyYieldHistory}
+                  margin={{ top: 15, right: 20, left: 10, bottom: 5 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis 
+                    dataKey="yearLabel" 
+                    tickLine={false} 
+                    stroke="#64748b" 
+                    fontSize={12} 
+                    fontWeight={500}
+                  />
+                  <YAxis 
+                    tickFormatter={(val) => `${val}%`} 
+                    stroke="#8b5cf6" 
+                    fontSize={12} 
+                    tickLine={false}
+                    axisLine={{ stroke: '#e2e8f0' }}
+                  />
+                  <Tooltip 
+                    content={({ active, payload }) => {
+                      if (!active || !payload || !payload.length) return null;
+                      const data = payload[0]?.payload as YearlyYieldPoint;
+                      if (!data) return null;
+
+                      return (
+                        <div className="bg-white p-3.5 rounded-xl border border-purple-100 shadow-xl text-xs font-medium space-y-2 min-w-[240px]">
+                          <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
+                            <span className="font-bold text-slate-900">{data.yearLabel}</span>
+                            <span className="text-[11px] text-purple-600 font-semibold bg-purple-50 px-2 py-0.5 rounded-md">
+                              Année {data.yearIndex}
+                            </span>
+                          </div>
+                          
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-slate-600">Rendement de l'année :</span>
+                              <span className="font-bold font-mono text-purple-700 text-sm">{formatPercent(data.yield)}</span>
+                            </div>
+
+                            {!data.isComplete && (
+                              <div className="flex items-center justify-between gap-4 text-[11px] text-indigo-600">
+                                <span>Taux annualisé équivalent ({data.monthsCount} mois) :</span>
+                                <span className="font-bold font-mono">{formatPercent(data.annualizedYield)} / an</span>
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-slate-600">Revenus nets perçus :</span>
+                              <span className="font-bold font-mono text-emerald-600">+{formatEuro(data.totalRevenue)}</span>
+                            </div>
+
+                            <div className="flex items-center justify-between gap-4">
+                              <span className="text-slate-600">Capital moyen actif :</span>
+                              <span className="font-bold font-mono text-slate-800">{formatEuro(data.averageCapital)}</span>
+                            </div>
+
+                            {data.startDate && data.endDate && (
+                              <div className="pt-1.5 border-t border-slate-100 text-[11px] text-slate-400">
+                                Période : {data.startDate} → {data.endDate}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <ReferenceLine 
+                    y={property.timeWeightedAnnualYield ?? property.annualYield} 
+                    stroke="#6366f1" 
+                    strokeDasharray="4 4"
+                    strokeWidth={2}
+                    label={{
+                      value: `Moyenne : ${formatPercent(property.timeWeightedAnnualYield ?? property.annualYield)}/an`,
+                      fill: '#4f46e5',
+                      fontSize: 11,
+                      position: 'insideTopRight',
+                      fontWeight: 600
+                    }}
+                  />
+                  <Bar 
+                    dataKey="yield" 
+                    name="Rendement annuel" 
+                    fill="#8b5cf6" 
+                    radius={[6, 6, 0, 0]}
+                    maxBarSize={55}
+                  >
+                    {property.yearlyYieldHistory.map((entry, index) => (
+                      <Cell 
+                        key={`cell-${index}`} 
+                        fill={entry.isComplete ? '#8b5cf6' : '#a855f7'} 
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Monthly detailed breakdown table */}
+            {showMonthlyYieldBreakdown && property.monthlyYieldHistory && property.monthlyYieldHistory.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-slate-100">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    <History size={16} className="text-purple-600" />
+                    Détail du calcul mois par mois ({property.monthlyYieldHistory.length} mois)
+                  </h4>
+                  <span className="text-xs text-slate-400">
+                    Rentabilité = (Revenu net / Capital actif) × 100
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                      <tr>
+                        <th className="py-2.5 px-3">Mois</th>
+                        <th className="py-2.5 px-3">Année</th>
+                        <th className="py-2.5 px-3 text-right">Capital Actif</th>
+                        <th className="py-2.5 px-3 text-right">Revenu Net</th>
+                        <th className="py-2.5 px-3 text-right">Rentabilité Mois</th>
+                        <th className="py-2.5 px-3 text-right">Rendement Cumulé</th>
+                        <th className="py-2.5 px-3">Mouvements</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-mono">
+                      {property.monthlyYieldHistory.map((m) => {
+                        const events: string[] = [];
+                        if (m.periodInvestment && m.periodInvestment > 0) {
+                          events.push(`Achat +${formatEuro(m.periodInvestment)}`);
+                        }
+                        if (m.marketplaceFees && m.marketplaceFees > 0) {
+                          events.push(`Frais Mkt +${formatEuro(m.marketplaceFees)}`);
+                        }
+                        if (m.periodRepayment && m.periodRepayment > 0) {
+                          events.push(`Remboursement/Vente -${formatEuro(m.periodRepayment)}`);
+                        }
+                        if (m.revenue === 0) {
+                          events.push("0€ revenu");
+                        }
+
+                        return (
+                          <tr key={m.monthKey} className={cn("hover:bg-slate-50/80 transition-colors", m.revenue === 0 ? "bg-slate-50/30" : "")}>
+                            <td className="py-2.5 px-3 font-semibold text-slate-800 font-sans">
+                              {m.formattedDate}
+                              <span className="block text-[10px] text-slate-400 font-mono">{m.dateStr}</span>
+                            </td>
+                            <td className="py-2.5 px-3 font-sans text-slate-600">
+                              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-[11px] font-medium">
+                                Année {m.yearIndex}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-800 font-bold">
+                              {formatEuro(m.activeCapital)}
+                            </td>
+                            <td className={cn("py-2.5 px-3 text-right font-bold", m.revenue > 0 ? "text-emerald-600" : "text-slate-400")}>
+                              {m.revenue > 0 ? `+${formatEuro(m.revenue)}` : '0,00 €'}
+                            </td>
+                            <td className={cn("py-2.5 px-3 text-right font-bold", m.monthlyYield > 0 ? "text-purple-700" : "text-slate-400")}>
+                              {formatPercent(m.monthlyYield)}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-indigo-700">
+                              {formatPercent(m.cumulativeYield)}
+                            </td>
+                            <td className="py-2.5 px-3 font-sans text-slate-500 text-[11px]">
+                              {events.length > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {events.map((ev, i) => (
+                                    <span key={i} className={cn("px-1.5 py-0.5 rounded text-[10px]", ev.includes("0€") ? "bg-amber-50 text-amber-700" : ev.includes("Frais") ? "bg-rose-50 text-rose-700" : "bg-blue-50 text-blue-700")}>
+                                      {ev}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="h-32 flex flex-col items-center justify-center text-center p-4 bg-slate-50/70 rounded-xl border border-dashed border-slate-200">
+            <p className="text-xs text-slate-500 font-medium">Pas assez de données pour afficher le rendement par année</p>
           </div>
         )}
       </div>

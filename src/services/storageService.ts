@@ -5,7 +5,34 @@ const STORAGE_KEYS = {
   METADATA: 'bricks_saved_metadata',
   FILE_NAME: 'bricks_saved_file_name',
   LAST_UPDATE: 'bricks_saved_timestamp',
+  VISIBLE_COLUMNS: 'bricks_visible_columns',
+  CONTRACT_FILTER: 'bricks_contract_filter',
+  REIMBURSEMENT_FILTER: 'bricks_reimbursement_filter',
 };
+
+/**
+ * Safely retrieve visible columns selection
+ */
+export function getStoredVisibleColumns<T>(): T | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.VISIBLE_COLUMNS);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Safely save visible columns selection
+ */
+export function saveStoredVisibleColumns<T>(columns: T): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.VISIBLE_COLUMNS, JSON.stringify(columns));
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 /**
  * Safely retrieve stored transactions from localStorage

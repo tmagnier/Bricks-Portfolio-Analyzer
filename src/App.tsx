@@ -86,6 +86,10 @@ import { StatCard } from './components/StatCard';
 import { FilterTab } from './components/FilterTab';
 import { PropertyDetail, FilterMode } from './components/PropertyDetail';
 import { ProjectNotFound } from './components/ProjectNotFound';
+import { GlobalTopFilters, ContractFilterType, ReimbursementFilterType } from './components/GlobalTopFilters';
+import { PropertyTable } from './components/PropertyTable';
+import { ContractTypeStatsSection } from './components/ContractTypeStatsSection';
+import { PropertyColumnKey, DEFAULT_VISIBLE_COLUMNS } from './data/columnsConfig';
 import { getProjectIdentifierFromUrl, findPropertyByIdOrSlug, updateProjectUrl } from './lib/router';
 import { 
   getStoredTransactions, 
@@ -94,12 +98,12 @@ import {
   saveStoredMetadata, 
   getStoredFileName, 
   saveStoredFileName, 
+  getStoredVisibleColumns,
+  saveStoredVisibleColumns,
   clearAllStoredData 
 } from './services/storageService';
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316'];
-
-type PropertySortField = 'name' | 'firstInvestmentDate' | 'startCapital' | 'currentCapital' | 'ownedBricks' | 'capitalGain' | 'netRevenues' | 'periodSales' | 'yield' | 'annualYield' | 'share';
 
 export default function App() {
   const [rawData, setRawData] = useState<string>('');
@@ -118,19 +122,19 @@ export default function App() {
   const [activeProjectParam, setActiveProjectParam] = useState<string | null>(() => getProjectIdentifierFromUrl());
   const [selectedProperty, setSelectedProperty] = useState<PropertyStats | null>(null);
 
-  // Search & Sorting state for Property Table
-  const [searchInputValue, setSearchInputValue] = useState<string>('');
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState<string>('');
-  const [sortField, setSortField] = useState<PropertySortField>('currentCapital');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  // Top Filters for Properties (Contract Type & Reimbursement Status)
+  const [contractFilter, setContractFilter] = useState<ContractFilterType>('all');
+  const [reimbursementFilter, setReimbursementFilter] = useState<ReimbursementFilterType>('all');
 
-  // Debounce effect for property search query
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedSearchQuery(searchInputValue);
-    }, 300);
-    return () => clearTimeout(handler);
-  }, [searchInputValue]);
+  // Property Table Visible Columns Customization
+  const [visibleColumns, setVisibleColumns] = useState<PropertyColumnKey[]>(() => {
+    return getStoredVisibleColumns<PropertyColumnKey[]>() || DEFAULT_VISIBLE_COLUMNS;
+  });
+
+  const handleVisibleColumnsChange = useCallback((cols: PropertyColumnKey[]) => {
+    setVisibleColumns(cols);
+    saveStoredVisibleColumns(cols);
+  }, []);
 
   // Transaction History states
   const [txSearchQuery, setTxSearchQuery] = useState<string>('');
@@ -361,6 +365,29 @@ export default function App() {
     calculateStats(transactions, dateRange.start, dateRange.end, projectMetadata), 
   [transactions, dateRange, projectMetadata]);
 
+  // Counts for properties filters
+  const royaltyCount = useMemo(() => properties.filter(p => !p.isObligation).length, [properties]);
+  const obligationCount = useMemo(() => properties.filter(p => p.isObligation).length, [properties]);
+  const activeCount = useMemo(() => properties.filter(p => p.currentCapital > 0.01).length, [properties]);
+  const refundedCount = useMemo(() => properties.filter(p => p.currentCapital <= 0.01).length, [properties]);
+
+  // Filtered properties based on top-level Contract & Reimbursement filters
+  const filteredProperties = useMemo(() => {
+    return properties.filter(p => {
+      // 1. Contract Type Filter
+      if (contractFilter === 'royalties_only' && p.isObligation) return false;
+      if (contractFilter === 'obligations_only' && !p.isObligation) return false;
+      if (contractFilter === 'exclude_royalties' && !p.isObligation) return false;
+      if (contractFilter === 'exclude_obligations' && p.isObligation) return false;
+
+      // 2. Reimbursement Status Filter
+      if (reimbursementFilter === 'active_only' && p.currentCapital <= 0.01) return false;
+      if (reimbursementFilter === 'refunded_only' && p.currentCapital > 0.01) return false;
+
+      return true;
+    });
+  }, [properties, contractFilter, reimbursementFilter]);
+
   // Synchronize active project from URL identifier whenever properties are calculated or activeProjectParam changes
   useEffect(() => {
     if (!activeProjectParam) {
@@ -405,7 +432,7 @@ export default function App() {
   [patrimoineTimeline, global.totalCurrentObligationCapital]);
 
   const topRevenuesChartData = useMemo(() => {
-    const sorted = properties
+    const sorted = filteredProperties
       .filter(p => p.netRevenues > 0)
       .sort((a, b) => b.netRevenues - a.netRevenues);
 
@@ -434,7 +461,7 @@ export default function App() {
     }
 
     return top5;
-  }, [properties]);
+  }, [filteredProperties]);
 
   const getTxPropertyName = useCallback((t: any): string => {
     if (!t) return "";
@@ -558,57 +585,6 @@ export default function App() {
     return filteredPeriodTransactions.slice(startIdx, startIdx + txsPerPage);
   }, [filteredPeriodTransactions, txPage]);
 
-  const handleSort = (field: PropertySortField) => {
-    if (sortField === field) {
-      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortField(field);
-      setSortDirection('desc');
-    }
-  };
-
-  const sortedProperties = useMemo(() => {
-    let filtered = properties;
-    if (debouncedSearchQuery.trim()) {
-      const q = debouncedSearchQuery.toLowerCase().trim();
-      filtered = properties.filter(p => {
-        const nameMatch = p.name.toLowerCase().includes(q);
-        const addrFr = p.metadata?.address?.fr?.toLowerCase() || '';
-        const addrEn = p.metadata?.address?.en?.toLowerCase() || '';
-        const addrRaw = typeof p.metadata?.address === 'string' ? (p.metadata.address as string).toLowerCase() : '';
-        const addressMatch = addrFr.includes(q) || addrEn.includes(q) || addrRaw.includes(q);
-        return nameMatch || addressMatch;
-      });
-    }
-
-    return [...filtered].sort((a, b) => {
-      let comparison = 0;
-
-      if (sortField === 'name') {
-        comparison = (a.name || '').localeCompare(b.name || '', 'fr', { sensitivity: 'base', numeric: true });
-      } else if (sortField === 'firstInvestmentDate') {
-        const timeA = a.firstInvestmentDate ? parse(a.firstInvestmentDate, "dd/MM/yyyy", new Date()).getTime() : 0;
-        const timeB = b.firstInvestmentDate ? parse(b.firstInvestmentDate, "dd/MM/yyyy", new Date()).getTime() : 0;
-        if (!timeA && !timeB) comparison = 0;
-        else if (!timeA) return 1;
-        else if (!timeB) return -1;
-        else comparison = timeA - timeB;
-      } else if (sortField === 'share') {
-        const valA = Number(a.currentCapital) || 0;
-        const valB = Number(b.currentCapital) || 0;
-        comparison = valA - valB;
-      } else {
-        const rawA = a[sortField as keyof PropertyStats];
-        const rawB = b[sortField as keyof PropertyStats];
-        const valA = typeof rawA === 'number' ? rawA : Number(rawA) || 0;
-        const valB = typeof rawB === 'number' ? rawB : Number(rawB) || 0;
-        comparison = valA - valB;
-      }
-
-      return sortDirection === 'asc' ? comparison : -comparison;
-    });
-  }, [properties, sortField, sortDirection, debouncedSearchQuery]);
-
   const formatEuro = (val: number) => 
     new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(val);
 
@@ -621,30 +597,6 @@ export default function App() {
     if (isNaN(d.getTime())) return dateStr;
     const monthsFr = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
     return `${d.getDate()} ${monthsFr[d.getMonth()]} ${d.getFullYear()}`;
-  };
-
-  const renderSortHeader = (field: PropertySortField, label: React.ReactNode) => {
-    const isSorted = sortField === field;
-    return (
-      <th 
-        onClick={() => handleSort(field)}
-        className="px-6 py-4 cursor-pointer hover:bg-slate-100/80 transition-colors select-none group"
-      >
-        <div className="flex items-center gap-1.5 font-bold">
-          <span>{label}</span>
-          <span className={cn(
-            "transition-opacity",
-            isSorted ? "opacity-100 text-blue-600" : "opacity-0 group-hover:opacity-40"
-          )}>
-            {isSorted ? (
-              sortDirection === 'asc' ? <TrendingUp size={14} /> : <TrendingDown size={14} />
-            ) : (
-              <ArrowUpDown size={14} />
-            )}
-          </span>
-        </div>
-      </th>
-    );
   };
 
   // If no transactions loaded yet
@@ -1049,7 +1001,7 @@ export default function App() {
                       Patrimoine & Capital
                     </h3>
                   </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-9 gap-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-5 2xl:grid-cols-10 gap-4">
                     <StatCard 
                       id="card-patrimoine-total"
                       title="Patrimoine Total" 
@@ -1057,6 +1009,15 @@ export default function App() {
                       icon={<Wallet className="text-blue-600" />}
                       description={`Capital (${formatEuro(global.totalCurrentCapital)}) + Solde (${formatEuro(global.currentSolde)})`}
                       badge="Global"
+                    />
+                    <StatCard 
+                      id="card-valeur-actuelle-briques"
+                      title="Valeur Actuelle Briques" 
+                      value={formatEuro(global.totalCurrentBricksValue)} 
+                      icon={<Blocks className={global.totalLatentCapitalGain >= 0 ? "text-emerald-600" : "text-rose-600"} />}
+                      description={`Plus/moins-value : ${global.totalLatentCapitalGain >= 0 ? '+' : ''}${formatEuro(global.totalLatentCapitalGain)} (${global.totalLatentCapitalGainPercent >= 0 ? '+' : ''}${formatPercent(global.totalLatentCapitalGainPercent)})`}
+                      badge={`${global.totalOwnedBricks} briques`}
+                      trend={global.totalLatentCapitalGain >= 0 ? "positive" : "negative"}
                     />
                     <StatCard 
                       id="card-capital-debut"
@@ -1257,6 +1218,16 @@ export default function App() {
                 )}
               </div>
 
+              {/* Sections Dédiées par Type de Contrat : Royalties & Obligations */}
+              <ContractTypeStatsSection 
+                royaltiesStats={global.royaltiesStats}
+                obligationsStats={global.obligationsStats}
+                currentFilter={contractFilter}
+                onFilterContract={(type) => {
+                  setContractFilter(type);
+                }}
+              />
+
               {/* Patrimoine & Solde Timeline Evolution */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-8">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
@@ -1390,7 +1361,7 @@ export default function App() {
                   </div>
                   <div className="h-80">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={properties.slice(0, 10)}>
+                      <BarChart data={filteredProperties.slice(0, 10)}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                         <XAxis dataKey="name" hide />
                         <YAxis tickFormatter={(val) => `${val}€`} />
@@ -1407,7 +1378,7 @@ export default function App() {
 
                             const totalCap = global.totalCurrentCapital || properties.reduce((acc, p) => acc + p.currentCapital, 0);
                             const pct = totalCap > 0 ? (item.currentCapital / totalCap) * 100 : 0;
-                            const top10 = properties.slice(0, 10);
+                            const top10 = filteredProperties.slice(0, 10);
                             const itemIndex = top10.findIndex(p => p.name === item.name);
                             const fillColor = itemIndex !== -1 ? COLORS[itemIndex % COLORS.length] : (data.fill || data.color || '#6366f1');
 
@@ -1619,178 +1590,32 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Property Table */}
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div>
-                    <h3 className="text-lg font-bold">Détails par Immeuble</h3>
-                    <p className="text-xs text-slate-400 font-medium">
-                      {debouncedSearchQuery.trim() ? `${sortedProperties.length} / ${properties.length} immeuble(s)` : `${properties.length} immeuble(s)`} • Cliquez sur une en-tête pour trier
-                    </p>
-                  </div>
-
-                  {/* Search Input */}
-                  <div className="relative w-full sm:w-72">
-                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-                    <input 
-                      id="input-search-properties"
-                      type="text" 
-                      placeholder="Rechercher un immeuble..."
-                      value={searchInputValue}
-                      onChange={(e) => setSearchInputValue(e.target.value)}
-                      className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all placeholder:text-slate-400"
-                    />
-                    {searchInputValue && (
-                      <button 
-                        id="btn-clear-prop-search"
-                        onClick={() => {
-                          setSearchInputValue('');
-                          setDebouncedSearchQuery('');
-                        }}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded-full hover:bg-slate-200 transition-all cursor-pointer"
-                        title="Effacer"
-                      >
-                        <X size={14} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider font-semibold">
-                        {renderSortHeader('name', 'Immeuble')}
-                        {renderSortHeader('firstInvestmentDate', '1er Achat')}
-                        {renderSortHeader('startCapital', 'Capital (Début)')}
-                        {renderSortHeader('currentCapital', 'Capital (Fin)')}
-                        {renderSortHeader('ownedBricks', <span className="inline-flex items-center gap-1.5"><Blocks size={13} className="text-amber-500" /> Briques</span>)}
-                        {renderSortHeader('capitalGain', 'Gain Capital')}
-                        {renderSortHeader('netRevenues', 'Revenus Nets')}
-                        {renderSortHeader('periodSales', 'Ventes')}
-                        {renderSortHeader('yield', 'Rendement Total')}
-                        {renderSortHeader('annualYield', 'Rendement / An')}
-                        {renderSortHeader('share', 'Part')}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {sortedProperties.length === 0 ? (
-                        <tr>
-                          <td colSpan={11} className="px-6 py-12 text-center text-slate-400">
-                            <Building2 size={32} className="mx-auto mb-2 opacity-50" />
-                            <p className="font-medium text-sm">Aucun immeuble ne correspond à "{searchInputValue || debouncedSearchQuery}"</p>
-                            <button 
-                              onClick={() => {
-                                setSearchInputValue('');
-                                setDebouncedSearchQuery('');
-                              }}
-                              className="mt-2 text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
-                            >
-                              Effacer la recherche
-                            </button>
-                          </td>
-                        </tr>
-                      ) : (
-                        sortedProperties.map((p) => (
-                        <tr 
-                          key={p.name} 
-                          id={`row-property-${p.name.replace(/[^a-zA-Z0-9]/g, '-')}`}
-                          onClick={() => handleSelectProperty(p)}
-                          className="hover:bg-slate-50 transition-colors group cursor-pointer"
-                        >
-                          <td className="px-6 py-4">
-                            <div className="flex items-center gap-3">
-                              {p.metadata?.thumbnailUrl && (
-                                <img 
-                                  src={p.metadata.thumbnailUrl} 
-                                  alt={p.name} 
-                                  className="w-10 h-10 rounded-lg object-cover border border-slate-200"
-                                  referrerPolicy="no-referrer"
-                                />
-                              )}
-                              <div>
-                                <div className="font-semibold text-slate-900 group-hover:text-blue-600 transition-colors flex items-center gap-1">
-                                  <span>{p.name}</span>
-                                  <ArrowUpRight size={13} className="text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
-                                </div>
-                                {p.metadata?.address && (
-                                  <div className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
-                                    <MapPin size={10} />
-                                    {p.metadata.address.fr}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 text-slate-600 font-mono text-xs">
-                            {p.firstInvestmentDate || '-'}
-                          </td>
-                          <td className="px-6 py-4 font-medium text-slate-600 text-sm">{formatEuro(p.startCapital)}</td>
-                          <td className="px-6 py-4 font-semibold text-slate-900 text-sm">{formatEuro(p.currentCapital)}</td>
-                          <td className="px-6 py-4 text-sm font-semibold text-slate-800 font-mono">
-                            <div className="flex flex-col">
-                              <div className="flex items-center gap-1.5">
-                                <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-800 border border-amber-500/20 inline-flex items-center gap-1 font-bold text-xs">
-                                  <Blocks size={13} className="text-amber-500 shrink-0" />
-                                  <span>{p.ownedBricks}</span>
-                                </span>
-                              </div>
-                              {p.ownedBricks > 0 && (
-                                <span className="text-[10px] text-slate-400 font-normal mt-0.5">
-                                  @{formatEuro(p.currentBrickPrice)}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 font-medium text-sm">
-                            {(() => {
-                              const cg = Math.round((p.capitalGain || 0) * 100) / 100;
-                              return (
-                                <span className={cn(
-                                  cg > 0 ? "text-emerald-600 font-semibold" : cg < 0 ? "text-rose-600" : "text-slate-400"
-                                )}>
-                                  {cg > 0 ? '+' : ''}{formatEuro(cg)}
-                                </span>
-                              );
-                            })()}
-                          </td>
-                          <td className="px-6 py-4 text-sm">
-                            <span className={cn(
-                              "font-semibold",
-                              p.netRevenues > 0 ? "text-emerald-600" : "text-slate-400"
-                            )}>
-                              {formatEuro(p.netRevenues)}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-sm text-slate-700 font-medium">
-                            {p.periodSales > 0 ? formatEuro(p.periodSales) : '-'}
-                          </td>
-                          <td className="px-6 py-4">
-                            <div className="flex items-center gap-2">
-                              <div className="w-12 h-1.5 bg-slate-100 rounded-full overflow-hidden hidden xl:block">
-                                <div 
-                                  className="h-full bg-blue-500" 
-                                  style={{ width: `${Math.min(100, Math.max(0, p.yield))}%` }} 
-                                />
-                              </div>
-                              <span className="font-semibold text-slate-900 text-sm">{formatPercent(p.yield)}</span>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4 font-semibold text-slate-900 text-sm">
-                            {formatPercent(p.annualYield)}
-                          </td>
-                          <td className="px-6 py-4 text-slate-500 text-xs font-mono">
-                            {(() => {
-                              const totalCap = global.totalCurrentCapital || properties.reduce((acc, item) => acc + item.currentCapital, 0);
-                              const sharePct = totalCap > 0 ? (p.currentCapital / totalCap) * 100 : 0;
-                              return formatPercent(sharePct);
-                            })()}
-                          </td>
-                        </tr>
-                      )))}
-                    </tbody>
-                  </table>
-                </div>
+              {/* Global Filters: Contract Type & Reimbursement Status for Properties */}
+              <div className="mb-4">
+                <GlobalTopFilters 
+                  contractFilter={contractFilter}
+                  onContractFilterChange={setContractFilter}
+                  reimbursementFilter={reimbursementFilter}
+                  onReimbursementFilterChange={setReimbursementFilter}
+                  totalPropertiesCount={properties.length}
+                  filteredPropertiesCount={filteredProperties.length}
+                  royaltyCount={royaltyCount}
+                  obligationCount={obligationCount}
+                  activeCount={activeCount}
+                  refundedCount={refundedCount}
+                />
               </div>
+
+              {/* Property Table with customizable columns & sorting */}
+              <PropertyTable 
+                properties={filteredProperties}
+                totalPortfolioCapital={global.totalCurrentCapital || properties.reduce((acc, item) => acc + item.currentCapital, 0)}
+                onSelectProperty={handleSelectProperty}
+                formatEuro={formatEuro}
+                formatPercent={formatPercent}
+                visibleColumns={visibleColumns}
+                onVisibleColumnsChange={handleVisibleColumnsChange}
+              />
 
               {/* Transactions Global History Table */}
               <div className="mt-8 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">

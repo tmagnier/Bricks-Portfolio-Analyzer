@@ -3,8 +3,11 @@ import {
   Transaction, 
   PropertyStats, 
   GlobalStats, 
+  ContractTypeStats,
   ProjectMetadata, 
   PropertyTimelinePoint,
+  YearlyYieldPoint,
+  MonthlyYieldPoint,
   TransactionType,
   normalizeTransactionType,
   isPurchaseType,
@@ -36,6 +39,212 @@ export function formatInvestmentDuration(start: Date, end: Date): string {
     return `${years} an${years > 1 ? 's' : ''}`;
   }
   return `${years} an${years > 1 ? 's' : ''} et ${remainingMonths} mois`;
+}
+
+/**
+ * Calculates monthly and yearly rentabilities taking into account variable capital
+ * (marketplace purchases, brick sales, marketplace fees) and 0 revenue for inactive months.
+ */
+export interface PropertyYieldTimelineResult {
+  monthlyYieldHistory: MonthlyYieldPoint[];
+  yearlyYieldHistory: YearlyYieldPoint[];
+  timeWeightedTotalYield: number;
+  timeWeightedAnnualYield: number;
+  totalDurationInMonths: number;
+  totalDurationInYears: number;
+}
+
+export function calculatePropertyYieldTimeline(
+  sortedTxsAsc: (Transaction & { parsedDate: Date })[],
+  firstInvestmentDateObj: Date | null,
+  isProjectFinished: boolean,
+  capitalZeroDateObj: Date | null
+): PropertyYieldTimelineResult {
+  if (!firstInvestmentDateObj || sortedTxsAsc.length === 0) {
+    return {
+      monthlyYieldHistory: [],
+      yearlyYieldHistory: [],
+      timeWeightedTotalYield: 0,
+      timeWeightedAnnualYield: 0,
+      totalDurationInMonths: 0,
+      totalDurationInYears: 0
+    };
+  }
+
+  const now = new Date();
+  const startMonthDate = startOfMonth(firstInvestmentDateObj);
+  let endMonthDate = startOfMonth(now);
+
+  if (isProjectFinished && capitalZeroDateObj) {
+    endMonthDate = startOfMonth(capitalZeroDateObj);
+  } else if (isProjectFinished && sortedTxsAsc.length > 0) {
+    const lastTx = [...sortedTxsAsc].reverse().find(t => {
+      const norm = (t.type || "").toLowerCase();
+      return norm.includes("vente") || norm.includes("remboursement") || norm.includes("revente");
+    });
+    if (lastTx) {
+      endMonthDate = startOfMonth(lastTx.parsedDate);
+    }
+  }
+
+  if (isBefore(endMonthDate, startMonthDate)) {
+    endMonthDate = startMonthDate;
+  }
+
+  // Pre-group transactions by month (yyyy-MM)
+  const txByMonth = new Map<string, (Transaction & { parsedDate: Date })[]>();
+  sortedTxsAsc.forEach(t => {
+    const key = format(t.parsedDate, "yyyy-MM");
+    if (!txByMonth.has(key)) {
+      txByMonth.set(key, []);
+    }
+    txByMonth.get(key)!.push(t);
+  });
+
+  let curr = startMonthDate;
+  let monthIndex = 1;
+  let runningCapital = 0;
+  let cumulativeYield = 0;
+  let cumulativeRevenue = 0;
+  const monthlyYieldHistory: MonthlyYieldPoint[] = [];
+
+  while (!isAfter(curr, endMonthDate)) {
+    const monthKey = format(curr, "yyyy-MM");
+    const mtxs = txByMonth.get(monthKey) || [];
+
+    let monthRevenue = 0;
+    let periodInvestment = 0;
+    let periodRepayment = 0;
+    let periodMarketplaceFees = 0;
+
+    // Process transactions in this month
+    mtxs.forEach(t => {
+      const rawVal = parseFloat((t["montant (€)"] || "0").replace(",", "."));
+      if (isNaN(rawVal)) return;
+      const amount = Math.abs(rawVal);
+      const normType = normalizeTransactionType(t.type);
+      const rawType = (t.type || "").toLowerCase();
+
+      const isAchat = isPurchaseType(t.type);
+      const isFee = normType === TransactionType.FRAIS_ACHAT_MARKETPLACE || isFeeType(t.type) || rawType.includes("frais");
+      const isRepayOrSale = isRepaymentOrSaleType(t.type);
+      const isTotalResale = isTotalResaleType(t.type);
+      const isRev = isRevenueType(t.type);
+      const isCommercial = normType === TransactionType.AJUSTEMENT_COMMERCIAL;
+      const isTax = normType === TransactionType.PRELEVEMENT_SOURCE || isTaxType(t.type);
+
+      if (isAchat) {
+        runningCapital += amount;
+        periodInvestment += amount;
+      } else if (isFee) {
+        // Marketplace fees on purchase increase the invested capital cost for yield calculation
+        runningCapital += amount;
+        periodMarketplaceFees += amount;
+      } else if (!isRev && isRepayOrSale) {
+        runningCapital = Math.max(0, runningCapital - amount);
+        periodRepayment += amount;
+      }
+
+      if (isTotalResale) {
+        runningCapital = 0;
+      }
+
+      if (isRev || isCommercial) {
+        monthRevenue += rawVal > 0 ? rawVal : amount;
+      } else if (isTax) {
+        monthRevenue += rawVal; // tax is negative
+      }
+    });
+
+    monthRevenue = Math.round(monthRevenue * 100) / 100;
+    const activeCapital = Math.max(0, Math.round(runningCapital * 100) / 100);
+
+    // Monthly yield rentability: revenue / activeCapital * 100
+    // If no revenue in this month, monthRevenue = 0 and monthlyYield = 0
+    let monthlyYield = 0;
+    if (activeCapital > 0 && monthRevenue !== 0) {
+      monthlyYield = (monthRevenue / activeCapital) * 100;
+    }
+    monthlyYield = Math.round(monthlyYield * 10000) / 10000;
+
+    cumulativeYield = Math.round((cumulativeYield + monthlyYield) * 10000) / 10000;
+    cumulativeRevenue = Math.round((cumulativeRevenue + monthRevenue) * 100) / 100;
+
+    const yearIndex = Math.floor((monthIndex - 1) / 12) + 1;
+
+    monthlyYieldHistory.push({
+      monthIndex,
+      monthKey,
+      dateStr: format(endOfMonth(curr), "dd/MM/yyyy"),
+      formattedDate: format(curr, "MM/yy"),
+      revenue: monthRevenue,
+      activeCapital,
+      monthlyYield: Math.round(monthlyYield * 100) / 100,
+      cumulativeYield: Math.round(cumulativeYield * 100) / 100,
+      hasRevenue: monthRevenue > 0,
+      yearIndex,
+      periodInvestment: Math.round(periodInvestment * 100) / 100,
+      periodRepayment: Math.round(periodRepayment * 100) / 100,
+      marketplaceFees: Math.round(periodMarketplaceFees * 100) / 100
+    });
+
+    curr = addMonths(curr, 1);
+    monthIndex++;
+  }
+
+  // Build yearly breakdown
+  const yearlyMap = new Map<number, MonthlyYieldPoint[]>();
+  monthlyYieldHistory.forEach(m => {
+    if (!yearlyMap.has(m.yearIndex)) {
+      yearlyMap.set(m.yearIndex, []);
+    }
+    yearlyMap.get(m.yearIndex)!.push(m);
+  });
+
+  const yearlyYieldHistory: YearlyYieldPoint[] = Array.from(yearlyMap.entries()).map(([yearIndex, months]) => {
+    const monthsCount = months.length;
+    const isComplete = monthsCount === 12;
+    const yearYield = Math.round(months.reduce((acc, m) => acc + m.monthlyYield, 0) * 100) / 100;
+    const annualizedYield = monthsCount > 0 ? Math.round(((yearYield * 12) / monthsCount) * 100) / 100 : yearYield;
+    const totalRevenue = Math.round(months.reduce((acc, m) => acc + m.revenue, 0) * 100) / 100;
+    const avgCapital = monthsCount > 0 
+      ? Math.round((months.reduce((acc, m) => acc + m.activeCapital, 0) / monthsCount) * 100) / 100 
+      : 0;
+
+    let yearLabel = `${yearIndex}ème année`;
+    if (yearIndex === 1) {
+      yearLabel = isComplete ? "1ère année écoulée" : `1ère année (${monthsCount} mois)`;
+    } else {
+      yearLabel = isComplete ? `${yearIndex}ème année écoulée` : `${yearIndex}ème année (${monthsCount} mois)`;
+    }
+
+    return {
+      yearIndex,
+      yearLabel,
+      yield: yearYield,
+      annualizedYield,
+      totalRevenue,
+      averageCapital: avgCapital,
+      monthsCount,
+      isComplete,
+      startDate: months[0]?.dateStr,
+      endDate: months[months.length - 1]?.dateStr
+    };
+  });
+
+  const totalDurationInMonths = monthlyYieldHistory.length;
+  const totalDurationInYears = Math.max(totalDurationInMonths / 12, 1 / 12);
+  const timeWeightedTotalYield = Math.round(yearlyYieldHistory.reduce((acc, y) => acc + y.yield, 0) * 100) / 100;
+  const timeWeightedAnnualYield = Math.round((timeWeightedTotalYield / totalDurationInYears) * 100) / 100;
+
+  return {
+    monthlyYieldHistory,
+    yearlyYieldHistory,
+    timeWeightedTotalYield,
+    timeWeightedAnnualYield,
+    totalDurationInMonths,
+    totalDurationInYears
+  };
 }
 
 export const getSoldeImpact = (typeStr: string): number => {
@@ -463,6 +672,47 @@ export const calculateStats = (
       }
     }
 
+    // Calculate dynamic yield timeline taking into account monthly capital variations & 0 revenue months
+    const yieldTimelineResult = calculatePropertyYieldTimeline(
+      sortedTxsAsc.map(t => ({ ...t, parsedDate: parseDate(t.date) })),
+      firstInvestmentDateObj,
+      isProjectFinished,
+      capitalZeroDate ? parseDate(capitalZeroDate) : (capitalZeroDateStr ? parseDate(capitalZeroDateStr) : null)
+    );
+
+    const {
+      monthlyYieldHistory,
+      yearlyYieldHistory,
+      timeWeightedTotalYield,
+      timeWeightedAnnualYield
+    } = yieldTimelineResult;
+
+    // If no custom period filter is active (full lifetime), use timeWeightedTotalYield and timeWeightedAnnualYield
+    // If a custom filter (startDate or endDate) is active, calculate yield on that period using the monthly slices
+    let effectiveYield = timeWeightedTotalYield;
+    let effectiveAnnualYield = timeWeightedAnnualYield;
+
+    if (startDate || endDate) {
+      const filterStart = startDate ? startOfMonth(startDate) : null;
+      const filterEnd = endDate ? endOfMonth(endDate) : null;
+
+      const filteredMonths = monthlyYieldHistory.filter(m => {
+        const mDate = parse(m.monthKey, "yyyy-MM", new Date());
+        if (filterStart && isBefore(mDate, filterStart)) return false;
+        if (filterEnd && isAfter(mDate, filterEnd)) return false;
+        return true;
+      });
+
+      if (filteredMonths.length > 0) {
+        effectiveYield = Math.round(filteredMonths.reduce((acc, m) => acc + m.monthlyYield, 0) * 100) / 100;
+        const durYears = Math.max(filteredMonths.length / 12, 1 / 12);
+        effectiveAnnualYield = Math.round((effectiveYield / durYears) * 100) / 100;
+      } else {
+        effectiveYield = 0;
+        effectiveAnnualYield = 0;
+      }
+    }
+
     // Project opening date from metadata
     let projectOpeningDate: string | undefined = undefined;
     let projectStartDateObj: Date | null = null;
@@ -557,8 +807,12 @@ export const calculateStats = (
       netRevenues,
       commercialAdjustments,
       periodSales,
-      yield: yieldVal,
-      annualYield,
+      yield: effectiveYield,
+      annualYield: effectiveAnnualYield,
+      timeWeightedTotalYield,
+      timeWeightedAnnualYield,
+      yearlyYieldHistory,
+      monthlyYieldHistory,
       firstInvestmentDate,
       firstRevenueDate,
       lastRevenueDate,
@@ -920,6 +1174,147 @@ export const calculateStats = (
     averageDaysBeforeFirstRevenue = Math.round(totalDays / projectsWithFirstRevenue.length);
   }
 
+  // 1. Global Bricks Valuation (Current valuation = sum of ownedBricks * currentBrickPrice)
+  const activeRealProps = realProperties.filter(p => p.currentCapital > 0.01 || p.ownedBricks > 0);
+  const totalCurrentBricksValue = Math.round(activeRealProps.reduce((acc, p) => acc + (p.currentTotalValue || 0), 0) * 100) / 100;
+  const totalCostForOwnedBricks = Math.round(activeRealProps.reduce((acc, p) => acc + (p.costForOwnedBricks || 0), 0) * 100) / 100;
+  const totalLatentCapitalGain = Math.round((totalCurrentBricksValue - totalCostForOwnedBricks) * 100) / 100;
+  const totalLatentCapitalGainPercent = totalCostForOwnedBricks > 0 ? Math.round(((totalLatentCapitalGain / totalCostForOwnedBricks) * 100) * 100) / 100 : 0;
+  const totalBoughtBricksCount = Math.round(realProperties.reduce((acc, p) => acc + (p.totalBoughtBricks || p.ownedBricks || 0), 0) * 100) / 100;
+
+  // 2. Royalties stats (Revenus locatifs reversés & valorisation)
+  const royaltyProps = realProperties.filter(p => !p.isObligation);
+  const activeRoyaltyProps = royaltyProps.filter(p => p.currentCapital > 0.01 || p.ownedBricks > 0);
+  const refundedRoyaltyProps = royaltyProps.filter(p => p.currentCapital <= 0.01 && p.totalInvested > 0.01);
+  
+  const royaltyTotalInvested = royaltyProps.reduce((acc, p) => acc + p.totalInvested, 0);
+  const royaltyCurrentCapital = royaltyProps.reduce((acc, p) => acc + p.currentCapital, 0);
+  const royaltyStartCapital = royaltyProps.reduce((acc, p) => acc + p.startCapital, 0);
+  const royaltyCapitalGain = royaltyCurrentCapital - royaltyStartCapital;
+  const royaltyOwnedBricksCount = Math.round(activeRoyaltyProps.reduce((acc, p) => acc + p.ownedBricks, 0) * 100) / 100;
+  const royaltyTotalBoughtBricks = Math.round(royaltyProps.reduce((acc, p) => acc + (p.totalBoughtBricks || p.ownedBricks || 0), 0) * 100) / 100;
+  const royaltyCurrentTotalValue = Math.round(activeRoyaltyProps.reduce((acc, p) => acc + p.currentTotalValue, 0) * 100) / 100;
+  const royaltyCostForOwnedBricks = Math.round(activeRoyaltyProps.reduce((acc, p) => acc + p.costForOwnedBricks, 0) * 100) / 100;
+  const royaltyLatentCapitalGain = Math.round((royaltyCurrentTotalValue - royaltyCostForOwnedBricks) * 100) / 100;
+  const royaltyLatentCapitalGainPercent = royaltyCostForOwnedBricks > 0 ? Math.round(((royaltyLatentCapitalGain / royaltyCostForOwnedBricks) * 100) * 100) / 100 : 0;
+
+  const royaltyPositiveGainProjectsCount = activeRoyaltyProps.filter(p => p.latentCapitalGain > 0.01).length;
+  const royaltyNegativeGainProjectsCount = activeRoyaltyProps.filter(p => p.latentCapitalGain < -0.01).length;
+  const royaltyNeutralGainProjectsCount = activeRoyaltyProps.filter(p => Math.abs(p.latentCapitalGain) <= 0.01).length;
+
+  const royaltyNetRevenues = royaltyProps.reduce((acc, p) => acc + p.netRevenues, 0);
+  const royaltyTotalPeriodSales = royaltyProps.reduce((acc, p) => acc + p.periodSales, 0);
+  const royaltyDenominator = royaltyTotalInvested > 0 ? royaltyTotalInvested : royaltyCurrentCapital;
+  const royaltyAverageYield = royaltyDenominator > 0 ? (royaltyNetRevenues / royaltyDenominator) * 100 : 0;
+  
+  const royaltyWeightedAnnualYield = royaltyProps.reduce((acc, p) => {
+    const w = p.totalInvested > 0 ? p.totalInvested : p.currentCapital;
+    return acc + (p.annualYield * w);
+  }, 0);
+  const royaltyAverageAnnualYield = royaltyDenominator > 0 ? royaltyWeightedAnnualYield / royaltyDenominator : (royaltyProps.length > 0 ? royaltyProps.reduce((acc, p) => acc + p.annualYield, 0) / royaltyProps.length : 0);
+
+  const royaltyPropsWithFirstRevenue = royaltyProps.filter(p => p.daysBeforeFirstRevenue !== undefined);
+  const royaltyAverageDaysBeforeFirstRevenue = royaltyPropsWithFirstRevenue.length > 0 
+    ? Math.round(royaltyPropsWithFirstRevenue.reduce((acc, p) => acc + (p.daysBeforeFirstRevenue || 0), 0) / royaltyPropsWithFirstRevenue.length) 
+    : undefined;
+
+  const royaltiesStats: ContractTypeStats = {
+    contractType: 'Royalty',
+    totalProjectsCount: royaltyProps.length,
+    activeProjectsCount: activeRoyaltyProps.length,
+    refundedProjectsCount: refundedRoyaltyProps.length,
+    totalInvested: royaltyTotalInvested,
+    currentCapital: royaltyCurrentCapital,
+    startCapital: royaltyStartCapital,
+    capitalGain: royaltyCapitalGain,
+    ownedBricks: royaltyOwnedBricksCount,
+    totalBoughtBricks: royaltyTotalBoughtBricks,
+    currentTotalValue: royaltyCurrentTotalValue,
+    costForOwnedBricks: royaltyCostForOwnedBricks,
+    latentCapitalGain: royaltyLatentCapitalGain,
+    latentCapitalGainPercent: royaltyLatentCapitalGainPercent,
+    positiveGainProjectsCount: royaltyPositiveGainProjectsCount,
+    negativeGainProjectsCount: royaltyNegativeGainProjectsCount,
+    neutralGainProjectsCount: royaltyNeutralGainProjectsCount,
+    netRevenues: royaltyNetRevenues,
+    totalHistoricalPeriodSales: royaltyTotalPeriodSales,
+    averageYield: royaltyAverageYield,
+    averageAnnualYield: royaltyAverageAnnualYield,
+    averageDaysBeforeFirstRevenue: royaltyAverageDaysBeforeFirstRevenue,
+    projectsWithRevenueCount: royaltyPropsWithFirstRevenue.length
+  };
+
+  // 3. Obligations stats (Prêts obligataires participatifs & remboursements)
+  const obligationProps = realProperties.filter(p => p.isObligation);
+  const activeObligationProps = obligationProps.filter(p => p.currentCapital > 0.01 || p.ownedBricks > 0);
+  const refundedObligationProps = obligationProps.filter(p => p.currentCapital <= 0.01 && p.totalInvested > 0.01);
+  
+  const obligationTotalInvested = obligationProps.reduce((acc, p) => acc + p.totalInvested, 0);
+  const obligationCurrentCapital = obligationProps.reduce((acc, p) => acc + p.currentCapital, 0);
+  const obligationStartCapital = obligationProps.reduce((acc, p) => acc + p.startCapital, 0);
+  const obligationCapitalGain = obligationCurrentCapital - obligationStartCapital;
+  const obligationOwnedBricksCount = Math.round(activeObligationProps.reduce((acc, p) => acc + p.ownedBricks, 0) * 100) / 100;
+  const obligationTotalBoughtBricks = Math.round(obligationProps.reduce((acc, p) => acc + (p.totalBoughtBricks || p.ownedBricks || 0), 0) * 100) / 100;
+  const obligationCurrentTotalValue = Math.round(activeObligationProps.reduce((acc, p) => acc + p.currentTotalValue, 0) * 100) / 100;
+  const obligationCostForOwnedBricks = Math.round(activeObligationProps.reduce((acc, p) => acc + p.costForOwnedBricks, 0) * 100) / 100;
+  const obligationLatentCapitalGain = Math.round((obligationCurrentTotalValue - obligationCostForOwnedBricks) * 100) / 100;
+  const obligationLatentCapitalGainPercent = obligationCostForOwnedBricks > 0 ? Math.round(((obligationLatentCapitalGain / obligationCostForOwnedBricks) * 100) * 100) / 100 : 0;
+
+  const obligationPositiveGainProjectsCount = activeObligationProps.filter(p => p.latentCapitalGain > 0.01).length;
+  const obligationNegativeGainProjectsCount = activeObligationProps.filter(p => p.latentCapitalGain < -0.01).length;
+  const obligationNeutralGainProjectsCount = activeObligationProps.filter(p => Math.abs(p.latentCapitalGain) <= 0.01).length;
+
+  const obligationNetRevenues = obligationProps.reduce((acc, p) => acc + p.netRevenues, 0);
+  const obligationTotalPeriodSales = obligationProps.reduce((acc, p) => acc + p.periodSales, 0);
+  const obligationDenominator = obligationTotalInvested > 0 ? obligationTotalInvested : obligationCurrentCapital;
+  const obligationAverageYield = obligationDenominator > 0 ? (obligationNetRevenues / obligationDenominator) * 100 : 0;
+
+  const obligationWeightedAnnualYield = obligationProps.reduce((acc, p) => {
+    const w = p.totalInvested > 0 ? p.totalInvested : p.currentCapital;
+    return acc + (p.annualYield * w);
+  }, 0);
+  const obligationAverageAnnualYield = obligationDenominator > 0 ? obligationWeightedAnnualYield / obligationDenominator : (obligationProps.length > 0 ? obligationProps.reduce((acc, p) => acc + p.annualYield, 0) / obligationProps.length : 0);
+
+  const obligationPropsWithFirstRevenue = obligationProps.filter(p => p.daysBeforeFirstRevenue !== undefined);
+  const obligationAverageDaysBeforeFirstRevenue = obligationPropsWithFirstRevenue.length > 0 
+    ? Math.round(obligationPropsWithFirstRevenue.reduce((acc, p) => acc + (p.daysBeforeFirstRevenue || 0), 0) / obligationPropsWithFirstRevenue.length) 
+    : undefined;
+
+  const repaidInAdvanceCount = obligationProps.filter(p => p.currentCapital <= 0.01 && p.repaymentTimingStatus === 'anticipation').length;
+  const repaidOnTimeCount = obligationProps.filter(p => p.currentCapital <= 0.01 && (p.repaymentTimingStatus === 'on_time' || !p.repaymentTimingStatus)).length;
+  const repaidLateCount = obligationProps.filter(p => p.currentCapital <= 0.01 && p.repaymentTimingStatus === 'retard').length;
+  const repaymentRate = obligationTotalInvested > 0 ? Math.round((Math.max(0, obligationTotalInvested - obligationCurrentCapital) / obligationTotalInvested) * 10000) / 100 : 0;
+
+  const obligationsStats: ContractTypeStats = {
+    contractType: 'Obligation',
+    totalProjectsCount: obligationProps.length,
+    activeProjectsCount: activeObligationProps.length,
+    refundedProjectsCount: refundedObligationProps.length,
+    totalInvested: obligationTotalInvested,
+    currentCapital: obligationCurrentCapital,
+    startCapital: obligationStartCapital,
+    capitalGain: obligationCapitalGain,
+    ownedBricks: obligationOwnedBricksCount,
+    totalBoughtBricks: obligationTotalBoughtBricks,
+    currentTotalValue: obligationCurrentTotalValue,
+    costForOwnedBricks: obligationCostForOwnedBricks,
+    latentCapitalGain: obligationLatentCapitalGain,
+    latentCapitalGainPercent: obligationLatentCapitalGainPercent,
+    positiveGainProjectsCount: obligationPositiveGainProjectsCount,
+    negativeGainProjectsCount: obligationNegativeGainProjectsCount,
+    neutralGainProjectsCount: obligationNeutralGainProjectsCount,
+    netRevenues: obligationNetRevenues,
+    totalHistoricalPeriodSales: obligationTotalPeriodSales,
+    averageYield: obligationAverageYield,
+    averageAnnualYield: obligationAverageAnnualYield,
+    averageDaysBeforeFirstRevenue: obligationAverageDaysBeforeFirstRevenue,
+    projectsWithRevenueCount: obligationPropsWithFirstRevenue.length,
+    repaidInAdvanceCount,
+    repaidOnTimeCount,
+    repaidLateCount,
+    repaymentRate
+  };
+
   return {
     properties: properties.sort((a, b) => b.currentCapital - a.currentCapital),
     global: {
@@ -934,6 +1329,13 @@ export const calculateStats = (
       obligationActiveProjectsCount,
       royaltyOwnedBricks: Math.round(royaltyOwnedBricks * 100) / 100,
       obligationOwnedBricks: Math.round(obligationOwnedBricks * 100) / 100,
+      totalCurrentBricksValue,
+      totalCostForOwnedBricks,
+      totalLatentCapitalGain,
+      totalLatentCapitalGainPercent,
+      totalBoughtBricksCount,
+      royaltiesStats,
+      obligationsStats,
       totalCapitalGain,
       totalNetRevenues,
       periodRoyaltyRevenues,

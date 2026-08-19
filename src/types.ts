@@ -88,6 +88,35 @@ export interface Transaction {
   "prix de la brick (€)": string;
 }
 
+export interface YearlyYieldPoint {
+  yearIndex: number; // 1, 2, 3...
+  yearLabel: string; // "1ère année (12 mois)", "2ème année (12 mois)", "3ème année (4 mois en cours)"
+  yield: number; // Rendement de l'année (%)
+  annualizedYield?: number; // Taux annualisé si année incomplète (%)
+  totalRevenue: number; // Revenus perçus (€)
+  averageCapital: number; // Capital moyen investi (€)
+  monthsCount: number; // Nombre de mois dans cette année (ex: 12 ou 4)
+  isComplete: boolean; // true si 12 mois complets
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface MonthlyYieldPoint {
+  monthIndex: number; // 1, 2, 3...
+  monthKey: string; // "yyyy-MM"
+  dateStr: string;
+  formattedDate: string; // "MM/yy"
+  revenue: number; // Revenu net du mois (€, 0 si pas de revenu)
+  activeCapital: number; // Capital actif investi au mois (€)
+  monthlyYield: number; // Rendement du mois (%) = (revenue / activeCapital) * 100
+  cumulativeYield: number; // Rendement cumulé (%)
+  hasRevenue: boolean;
+  yearIndex: number; // Année de rattachement (1, 2, 3...)
+  periodInvestment?: number;
+  periodRepayment?: number;
+  marketplaceFees?: number;
+}
+
 export interface PropertyStats {
   name: string;
   totalInvested: number; // Total money put in (purchases)
@@ -100,8 +129,12 @@ export interface PropertyStats {
   obligationRevenues?: number;
   commercialAdjustments?: number;
   periodSales: number; // Sales / capital returns on period
-  yield: number; // Rendement Total
-  annualYield: number; // Rendement par an / annuel
+  yield: number; // Rendement Total (basé sur capital variable et durée du prêt)
+  annualYield: number; // Rendement par an / annuel moyen
+  timeWeightedTotalYield?: number;
+  timeWeightedAnnualYield?: number;
+  yearlyYieldHistory?: YearlyYieldPoint[];
+  monthlyYieldHistory?: MonthlyYieldPoint[];
   firstInvestmentDate?: string; // Date du premier achat de l'investisseur (dd/MM/yyyy)
   firstRevenueDate?: string; // Date du premier versement de revenu (dd/MM/yyyy)
   lastRevenueDate?: string; // Date du dernier versement de revenu (dd/MM/yyyy)
@@ -135,6 +168,36 @@ export interface PropertyStats {
   latentCapitalGainPercent: number; // Plus ou moins-value latente (%)
 }
 
+export interface ContractTypeStats {
+  contractType: 'Royalty' | 'Obligation';
+  totalProjectsCount: number;
+  activeProjectsCount: number;
+  refundedProjectsCount: number;
+  totalInvested: number;
+  currentCapital: number;
+  startCapital: number;
+  capitalGain: number;
+  ownedBricks: number;
+  totalBoughtBricks: number;
+  currentTotalValue: number;
+  costForOwnedBricks: number;
+  latentCapitalGain: number;
+  latentCapitalGainPercent: number;
+  positiveGainProjectsCount: number;
+  negativeGainProjectsCount: number;
+  neutralGainProjectsCount: number;
+  netRevenues: number;
+  totalHistoricalPeriodSales: number;
+  averageYield: number;
+  averageAnnualYield: number;
+  averageDaysBeforeFirstRevenue?: number;
+  projectsWithRevenueCount: number;
+  repaidInAdvanceCount?: number;
+  repaidOnTimeCount?: number;
+  repaidLateCount?: number;
+  repaymentRate?: number;
+}
+
 export interface GlobalStats {
   totalInvested: number;
   totalStartCapital: number;
@@ -147,6 +210,18 @@ export interface GlobalStats {
   obligationActiveProjectsCount?: number;
   royaltyOwnedBricks?: number;
   obligationOwnedBricks?: number;
+  
+  // Total current bricks valuation & latent gain/loss
+  totalCurrentBricksValue: number; // Somme (briques possédées x prix actuel unitaire)
+  totalCostForOwnedBricks: number; // Prix de revient des briques possédées
+  totalLatentCapitalGain: number; // Plus ou moins-value latente globale (€)
+  totalLatentCapitalGainPercent: number; // Plus ou moins-value latente globale (%)
+  totalBoughtBricksCount?: number; // Total de briques achetées historiquement
+
+  // Specific detailed stats for Royalties & Obligations
+  royaltiesStats?: ContractTypeStats;
+  obligationsStats?: ContractTypeStats;
+
   totalCapitalGain: number;
   totalNetRevenues: number;
   periodRoyaltyRevenues: number;
